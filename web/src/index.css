@@ -1,0 +1,132 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+:root {
+  --bg:#f4f6fa; --card:#ffffff; --line:#e6e9f0; --ink:#0b1220; --mut:#7c8698;
+  --pri:#06b6d4; --pri2:#4f46e5; --ok:#10b981; --warn:#f59e0b; --bad:#f43f5e;
+  --font-sans:'Plus Jakarta Sans',system-ui,-apple-system,sans-serif;
+  --font-heading:'Space Grotesk',system-ui,sans-serif;
+  --font-mono:'JetBrains Mono',ui-monospace,monospace;
+  color-scheme: light;
+}
+:root.dark, html.dark {
+  --bg:#0a0f1e; --card:#151c30; --line:#27334e; --ink:#eef2fb; --mut:#9aa6bd;
+  color-scheme: dark;
+}
+*, *::before, *::after { box-sizing: border-box; }
+html, body { width:100%; max-width:100vw; overflow-x:hidden; margin:0; padding:0; }
+body { font-family:var(--font-sans); background:var(--bg); color:var(--ink);
+  -webkit-font-smoothing:antialiased; transition:background-color .2s ease, color .2s ease; }
+h1,h2,h3,.font-heading { font-family:var(--font-heading); }
+.font-mono,.tabular-nums { font-family:var(--font-mono); }
+::selection { background:rgba(6,182,212,.30); color:inherit; }
+.glass-panel {
+  background:color-mix(in srgb,var(--card) 88%,transparent);
+  backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+  transition:background-color .2s ease, border-color .2s ease;
+}
+.dark .glass-panel { background:color-mix(in srgb,var(--card) 92%,transparent); }
+.glass-card {
+  background:var(--card); border:1px solid var(--line); border-radius:16px;
+  box-shadow:0 1px 2px rgba(16,24,40,.05), 0 6px 16px -8px rgba(16,24,40,.08);
+  transition:background-color .2s ease, border-color .2s ease;
+}
+.dark .glass-card {
+  background:var(--card);
+  box-shadow:0 1px 0 rgba(255,255,255,.03) inset, 0 8px 20px -10px rgba(0,0,0,.6);
+}
+.dark input::placeholder, .dark textarea::placeholder { color:#6b7891; }
+.dark input, .dark textarea, .dark select { color:var(--ink); }
+.no-scrollbar::-webkit-scrollbar { display:none; }
+.no-scrollbar { -ms-overflow-style:none; scrollbar-width:none; }
+::-webkit-scrollbar { width:4px; height:4px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:color-mix(in srgb,var(--mut) 45%,transparent); border-radius:999px; }
+.dark ::-webkit-scrollbar-thumb { background:#33405e; }
+@keyframes border-shimmer { 0%,100%{background-position:0% 50%} 50%{background-position:100% 50%} }
+.range-card-animated { position:relative; background-clip:padding-box; }
+.range-card-animated::before { content:''; position:absolute; inset:-1px; border-radius:inherit;
+  background:linear-gradient(90deg,#06b6d4,#4f46e5,#06b6d4); background-size:250% 250%;
+  animation:border-shimmer 7s ease infinite;
+  -webkit-mask:linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite:xor; mask-composite:exclude; pointer-events:none; opacity:.25; }
+.range-card-animated:hover::before { opacity:.7; }
+.dark .range-card-animated::before { opacity:.4; }
+@keyframes mascot-float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-5px)} }
+.animate-mascot-float { animation:mascot-float 3.2s ease-in-out infinite; }
+@keyframes pulseDot { 0%,100%{opacity:1} 50%{opacity:.35} }
+.dot-live { animation:pulseDot 1.6s infinite; }
+.animate-in { animation-name:zi-enter; animation-duration:.15s; animation-timing-function:cubic-bezier(.16,1,.3,1); animation-fill-mode:both; }
+@keyframes zi-enter { from { opacity:var(--zo,0); transform:translateY(var(--zy,0)) scale(var(--zs,1)); } to { opacity:1; transform:none; } }
+.fade-in { --zo:0; } .zoom-in-95 { --zs:.95; }
+.slide-in-from-bottom-3 { --zy:.75rem; } .slide-in-from-bottom-5 { --zy:1.25rem; }
+.animate-in.duration-100{animation-duration:.1s} .animate-in.duration-150{animation-duration:.15s}
+.animate-in.duration-200{animation-duration:.2s} .animate-in.duration-300{animation-duration:.3s}
+.line-clamp-2 { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+@keyframes lbEmoji { 0%,100%{transform:translateY(0) scale(1) rotate(0)} 25%{transform:translateY(-2px) scale(1.12) rotate(-8deg)} 55%{transform:translateY(0) scale(1) rotate(0)} 80%{transform:translateY(-1px) scale(1.06) rotate(8deg)} }
+.lb-emoji{display:inline-block;animation:lbEmoji 3.6s ease-in-out infinite;filter:drop-shadow(0 2px 3px rgba(0,0,0,.25))}
+@keyframes lbSpark { 0%,100%{opacity:.15;transform:scale(.8)} 50%{opacity:.9;transform:scale(1.25)} }
+.lb-spark{animation:lbSpark 3.2s ease-in-out infinite}
+
+/* === APPEND: Leaderboard avatar animations === */
+@keyframes avatarFloat {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+@keyframes avatarBlink {
+  0%, 92%, 100% { transform: scaleY(1); }
+  95% { transform: scaleY(0.1); }
+}
+@keyframes crownBounce {
+  0%, 100% { transform: translateY(0) rotate(-2deg); }
+  50% { transform: translateY(-2px) rotate(2deg); }
+}
+@keyframes podiumShine {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+@keyframes confettiFall {
+  0% { transform: translateY(-20px) rotate(0deg); opacity: 1; }
+  100% { transform: translateY(40px) rotate(360deg); opacity: 0; }
+}
+@keyframes rankPulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.08); }
+}
+.avatar-float { animation: avatarFloat 3s ease-in-out infinite; }
+.avatar-eyes { transform-origin: center; animation: avatarBlink 4s infinite; }
+.avatar-crown { transform-origin: center bottom; animation: crownBounce 2s ease-in-out infinite; }
+.podium-shine {
+  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.3) 50%, transparent 100%);
+  background-size: 200% 100%;
+  animation: podiumShine 3s linear infinite;
+}
+.confetti-piece { animation: confettiFall 2s ease-in infinite; }
+.rank-up { animation: rankPulse 1.5s ease-in-out infinite; }
+/* === EOF: index.css append === */
+
+@keyframes avatarFloat { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+@keyframes avatarBlink { 0%, 92%, 100% { transform: scaleY(1); } 95% { transform: scaleY(0.1); } }
+@keyframes crownBounce { 0%, 100% { transform: translateY(0) rotate(-2deg); } 50% { transform: translateY(-2px) rotate(2deg); } }
+@keyframes podiumShine { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+@keyframes confettiFall { 0% { transform: translateY(-20px) rotate(0deg); opacity: 1; } 100% { transform: translateY(40px) rotate(360deg); opacity: 0; } }
+@keyframes rankPulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.08); } }
+.avatar-float { animation: avatarFloat 3s ease-in-out infinite; }
+.avatar-eyes { transform-origin: center; animation: avatarBlink 4s infinite; }
+.avatar-crown { transform-origin: center bottom; animation: crownBounce 2s ease-in-out infinite; }
+.podium-shine { background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.3) 50%, transparent 100%); background-size: 200% 100%; animation: podiumShine 3s linear infinite; }
+.confetti-piece { animation: confettiFall 2s ease-in infinite; }
+.rank-up { animation: rankPulse 1.5s ease-in-out infinite; }
+/* === EOF: index.css animations === */
+
+/* Leaderboard animations */
+@keyframes avatarFloat { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+@keyframes avatarBlink { 0%, 92%, 100% { transform: scaleY(1); } 95% { transform: scaleY(0.1); } }
+@keyframes crownBounce { 0%, 100% { transform: translateY(0) rotate(-2deg); } 50% { transform: translateY(-2px) rotate(2deg); } }
+@keyframes podiumShine { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+@keyframes confettiFall { 0% { transform: translateY(-20px) rotate(0deg); opacity: 1; } 100% { transform: translateY(40px) rotate(360deg); opacity: 0; } }
+.avatar-float { animation: avatarFloat 3s ease-in-out infinite; }
+.avatar-eyes { transform-origin: center; animation: avatarBlink 4s infinite; }
+.avatar-crown { transform-origin: center bottom; animation: crownBounce 2s ease-in-out infinite; }
+.podium-shine { background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.3) 50%, transparent 100%); background-size: 200% 100%; animation: podiumShine 3s linear infinite; }
+.confetti-piece { animation: confettiFall 2s ease-in infinite; }
+/* === EOF: index.css leaderboard animations === */
