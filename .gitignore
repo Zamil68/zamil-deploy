@@ -1,0 +1,70 @@
+# ══════════════════════════════════════════════════════
+# ZAMIL v3 — .gitignore (repo root)
+# ══════════════════════════════════════════════════════
+
+# ── Dependencies (NEVER commit — Nixpacks runs npm ci itself) ──
+node_modules/
+**/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ── Build outputs (NEVER commit — Nixpacks runs npm run build) ──
+dist/
+**/dist/
+build/
+**/build/
+*.tsbuildinfo
+.vite/
+**/.vite/
+
+# ── SECRETS / ENV (CRITICAL — secrets live ONLY in Dokploy) ──
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+
+# ── Logs & runtime state ──
+logs/
+**/logs/
+*.log
+.pm2/
+*.pid
+*.seed
+*.pid.lock
+
+# ── Test / coverage ──
+coverage/
+.nyc_output/
+
+# ── OS junk ──
+.DS_Store
+**/.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Editor / IDE ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Backups / temp ──
+*.bak
+*.backup*
+.cache/
+tmp/
+temp/
+
+# ══════════════════════════════════════════════════════
+# MUST STAY COMMITTED (do NOT add patterns for these):
+#   server/package-lock.json  → required by npm ci
+#   web/package-lock.json     → required by npm ci
+#   server/sql/               → schema.sql + extra.sql (migrations)
+#   classic/index.html        → redirect page served at /
+#   nixpacks.toml             → build recipe for Dokploy
+#   Dockerfile / docker-compose.yml / .dockerignore (harmless, optional)
+# ══════════════════════════════════════════════════════
