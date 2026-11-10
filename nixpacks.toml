@@ -1,6 +1,5 @@
-# ZAMIL v3 — Nixpacks build (no Docker)
 [phases.setup]
-nixPkgs = ['nodejs_20', 'npm']
+nixPkgs = ['nodejs_20']
 
 [phases.install]
 cmds = [
