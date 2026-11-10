@@ -21,8 +21,12 @@ import type { RangeItem, SmsMessage, LeaderboardData, NotificationItem } from '.
 
 type AppSubPage = 'dashboard' | 'admin' | 'cli' | 'notifications' | 'password';
 
+// Zoom: 1 = normal (current system look). + zooms in, − zooms out. User side only.
+const ZOOM_MIN = 0.8, ZOOM_MAX = 1.5;
+const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(z * 10) / 10));
+
 function DashboardContent() {
-  const { isLoggedIn } = useAuth();
+  const { isLoggedIn, username } = useAuth();
   const { showToast } = useToast();
   const live = useLive();
   const [activeTab, setActiveTab] = useState<ActiveTab>('ranges');
@@ -43,9 +47,24 @@ function DashboardContent() {
   const [latestOtpAlert, setLatestOtpAlert] = useState<{
     number: string; cli: string; message: string; time: string; burst?: number;
   } | null>(null);
+  const [zoom, setZoom] = useState<number>(1);
   const prevSmsCountRef = useRef<number>(0);
   const seenSmsKeysRef = useRef<Set<string>>(new Set());
   const lastRangeFetchRef = useRef<number>(0);
+
+  // ── Per-user zoom preference (remembered on this device, each user picks their own) ──
+  useEffect(() => {
+    try {
+      const v = parseFloat(localStorage.getItem('zamil_zoom_' + (username || '')) || '1');
+      setZoom(isNaN(v) ? 1 : clampZoom(v));
+    } catch { setZoom(1); }
+  }, [username]);
+
+  const changeZoom = useCallback((z: number) => {
+    const c = clampZoom(z);
+    setZoom(c);
+    try { localStorage.setItem('zamil_zoom_' + (username || ''), String(c)); } catch {}
+  }, [username]);
 
   const fetchRanges = useCallback(async (force = false) => {
     try {
@@ -180,8 +199,13 @@ function DashboardContent() {
 
   if (!isLoggedIn) return <LoginView />;
   const unreadCount = notifications.filter((n) => !n.read).length;
+  // Zoom applies to the user side only — Admin Hub / CLI Insights always stay at normal size
+  const pageZoom = (subPage === 'admin' || subPage === 'cli') ? 1 : zoom;
   return (
-    <div className="min-h-screen w-full max-w-full overflow-x-hidden bg-slate-50 dark:bg-[#0b1120] text-slate-900 dark:text-slate-100 flex flex-col transition-colors selection:bg-cyan-500 selection:text-white">
+    <div
+      className="min-h-screen w-full max-w-full overflow-x-hidden bg-slate-50 dark:bg-[#0b1120] text-slate-900 dark:text-slate-100 flex flex-col transition-colors selection:bg-cyan-500 selection:text-white"
+      style={{ zoom: pageZoom } as React.CSSProperties}
+    >
       <Header
         onOpenNotifications={() => setSubPage('notifications')}
         onOpenAdmin={(tab) => {
@@ -190,6 +214,8 @@ function DashboardContent() {
         }}
         onOpenChangePassword={() => setSubPage('password')}
         unreadNotifsCount={unreadCount}
+        zoom={zoom}
+        onZoom={changeZoom}
       />
       <main className="flex-1 w-full max-w-5xl mx-auto px-2.5 sm:px-6 pt-2.5 pb-20 overflow-x-hidden">
         {subPage === 'cli' && <CliInsightsView onBack={() => setSubPage('dashboard')} />}
