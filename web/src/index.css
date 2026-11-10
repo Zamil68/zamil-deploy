@@ -133,3 +133,23 @@ h1,h2,h3,.font-heading { font-family:var(--font-heading); }
 @keyframes otpTimer { from { width: 100%; } to { width: 0%; } }
 .otp-timer-bar { animation: otpTimer 3s linear forwards; }
 /* === EOF append === */
+/* === Dispatch animation v2 (1.4s, parallel to API) === */
+@keyframes shipOverlay { 0% {opacity:0} 10% {opacity:1} 78% {opacity:1} 100% {opacity:0} }
+.ship-overlay { animation: shipOverlay 1.4s ease both; }
+@keyframes shipCardPop { 0% {transform:scale(.72) translateY(12px); opacity:0} 16% {transform:scale(1.05) translateY(0); opacity:1} 30% {transform:scale(1)} 100% {transform:scale(1); opacity:1} }
+.ship-card { position:relative; animation: shipCardPop 1.4s cubic-bezier(.22,1,.36,1) both; }
+.ship-ring { position:absolute; left:50%; top:50%; width:76px; height:76px; margin:-38px 0 0 -38px; border-radius:50%; border:2px solid rgba(34,211,238,.45); animation: shipRing 1.15s ease-out both; }
+.ship-ring-b { animation-delay:.22s; border-color: rgba(129,140,248,.4); }
+@keyframes shipRing { 0% {transform:scale(.45); opacity:.9} 100% {transform:scale(1.55); opacity:0} }
+.ship-boat { position:relative; z-index:2; width:56px; height:56px; border-radius:18px; background:linear-gradient(135deg,#06b6d4,#4f46e5); display:flex; align-items:center; justify-content:center; box-shadow:0 12px 30px -8px rgba(6,182,212,.55); animation: shipSail 1.4s cubic-bezier(.45,0,.25,1) both; }
+@keyframes shipSail { 0% {transform:translateX(-34px) rotate(-6deg) scale(.9)} 45% {transform:translateX(4px) rotate(3deg) scale(1.06)} 75% {transform:translateX(24px) rotate(-2deg)} 100% {transform:translateX(34px) rotate(0) scale(1)} }
+.ship-wake { position:absolute; top:50%; height:4px; border-radius:9999px; background:linear-gradient(90deg,transparent,rgba(103,232,249,.85)); animation: shipWake 1.05s ease-out both; z-index:1; }
+.ship-wake-1 { width:26px; left:6px; margin-top:-2px; animation-delay:.12s }
+.ship-wake-2 { width:18px; left:0; margin-top:5px; animation-delay:.28s; opacity:.7 }
+.ship-wake-3 { width:12px; left:4px; margin-top:-9px; animation-delay:.42s; opacity:.5 }
+@keyframes shipWake { 0% {opacity:0; transform:translateX(18px) scaleX(.3)} 35% {opacity:.9} 100% {opacity:0; transform:translateX(-14px) scaleX(1)} }
+.ship-label { animation: shipLabel 1.4s ease both; }
+@keyframes shipLabel { 0% {opacity:0; transform:translateY(6px)} 18% {opacity:1; transform:none} 82% {opacity:1} 100% {opacity:0} }
+.ship-bar i { display:block; height:100%; width:0; border-radius:9999px; background:linear-gradient(90deg,#22d3ee,#818cf8); animation: shipBar 1.15s cubic-bezier(.3,.7,.4,1) both; }
+@keyframes shipBar { 0% {width:0} 60% {width:78%} 100% {width:100%} }
+/* === EOF: dispatch anim v2 === */
