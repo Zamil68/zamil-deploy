@@ -1,0 +1,17 @@
+# ZAMIL v3 — Nixpacks build (no Docker)
+[phases.setup]
+nixPkgs = ['nodejs_20', 'npm']
+
+[phases.install]
+cmds = [
+  'cd web && (npm ci || npm install)',
+  'cd server && (npm ci --omit=dev || npm install --omit=dev)'
+]
+
+[phases.build]
+cmds = [
+  'cd web && npm run build'
+]
+
+[start]
+cmd = "sh -c 'node server/migrate.js; node server/src/server.js'"
