@@ -266,57 +266,18 @@ async function refreshRange(rangeId){
 }
 function start(){ cdrLoop(); syncLoop(); reconcileLoop(); queueWorker(); clientsLoop(); rangeRotLoop(); console.log('[loops] daemons LIVE (cdr+sync+reconcile+queue+clients+rot)'); }
 module.exports = { start, ncMap, invalidateNc, maybeRangeRefresh, pushSmsTo, smsPayloadFor, refreshRange, dailyTruncationLoop };
-// ── BOAT 6: Daily CDR truncation at 5:00 AM PKT (midnight UTC) ──
+
+// ── BOAT 6: CDR retention ──
+// FIX: the old version wiped ALL CDR rows older than today at 5:00 AM PKT, so Week / Month
+// (and the Admin Hub OTP report) could never count more than one day. Now we keep 35 days of
+// raw CDR so Day / Week (7d) / Month (30d) and the 7-day chart are all computed live and match.
 async function dailyTruncationLoop(){
   while (true) {
     try {
-      const now = new Date();
-      const hour = now.getUTCHours();
-      const minute = now.getUTCMinutes();
-      
-      // Check if it's 00:00 UTC (5:00 AM PKT) and we haven't reset today
-      if (hour === 0 && minute === 0) {
-        const today = new Date().toISOString().slice(0, 10);
-        const lastReset = await q("SELECT MAX(last_reset_date) AS d FROM otp_counters");
-        const lastResetDate = lastReset.rows[0]?.d || '1970-01-01';
-        
-        if (lastResetDate < today) {
-          console.log('[truncation] Daily reset at 5:00 AM PKT');
-          
-          // 1. Archive yesterday's counts into weekly/monthly before deleting
-          const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-          await q(`
-            INSERT INTO otp_counters (username, otp_today, otp_week, otp_month, last_reset_date, updated_at)
-            SELECT 
-              client,
-              COUNT(*) AS otp_today,
-              COUNT(*) AS otp_week,
-              COUNT(*) AS otp_month,
-              $1::date,
-              NOW()
-            FROM sms_cdr
-            WHERE time >= $2::timestamp AND time < $3::timestamp AND client IS NOT NULL
-            GROUP BY client
-            ON CONFLICT (username) DO UPDATE SET
-              otp_week = otp_counters.otp_week + EXCLUDED.otp_today,
-              otp_month = otp_counters.otp_month + EXCLUDED.otp_today,
-              otp_today = 0,
-              last_reset_date = EXCLUDED.last_reset_date,
-              updated_at = NOW()
-          `, [today, yesterday + ' 00:00:00', today + ' 00:00:00']);
-          
-          // 2. Delete raw CDR rows older than today (keep only today's data)
-          const deleted = await q(`
-            DELETE FROM sms_cdr 
-            WHERE time < $1::timestamp
-          `, [today + ' 00:00:00']);
-          
-          console.log('[truncation] Deleted', deleted.rowCount, 'old CDR rows');
-        }
-      }
-    } catch (e) {
-      console.error('[truncation]', e.message);
-    }
-    await sleep(60000); // Check every minute
+      const del = await q("DELETE FROM sms_cdr WHERE time < NOW() - interval '35 days'");
+      if (del.rowCount) console.log('[retention] purged', del.rowCount, 'CDR rows older than 35 days');
+    } catch (e) { console.error('[retention]', e.message); }
+    await sleep(3600000); // hourly check
   }
 }
+// === EOF: loops.js ===
