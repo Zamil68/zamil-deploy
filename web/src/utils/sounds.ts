@@ -4,7 +4,6 @@ const getCtx = () => {
   if (ctx.state === 'suspended') ctx.resume();
   return ctx;
 };
-
 const tone = (freq: number, dur: number, type: OscillatorType = 'sine', vol = 0.12, delay = 0) => {
   const c = getCtx();
   const o = c.createOscillator();
@@ -18,9 +17,7 @@ const tone = (freq: number, dur: number, type: OscillatorType = 'sine', vol = 0.
   o.start(c.currentTime + delay);
   o.stop(c.currentTime + delay + dur);
 };
-
 export type ToneId = 'sms' | 'bell' | 'chime' | 'ding' | 'soft' | 'none';
-
 export const TONES: { id: ToneId; label: string; emoji: string }[] = [
   { id: 'sms', label: 'SMS (Single)', emoji: '📩' },
   { id: 'bell', label: 'Bell', emoji: '🔔' },
@@ -29,16 +26,13 @@ export const TONES: { id: ToneId; label: string; emoji: string }[] = [
   { id: 'soft', label: 'Soft', emoji: '🌙' },
   { id: 'none', label: 'Silent', emoji: '🔇' },
 ];
-
 // Prevent double-beep: track last played time
 let lastPlayedAt = 0;
-
 export const playTone = (id: ToneId) => {
   if (id === 'none') return;
   const now = Date.now();
   if (now - lastPlayedAt < 800) return; // Debounce: max 1 tone per 800ms
   lastPlayedAt = now;
-  
   try {
     switch (id) {
       case 'sms':
@@ -63,11 +57,14 @@ export const playTone = (id: ToneId) => {
     }
   } catch {}
 };
-
 export const getSavedTone = (): ToneId => {
   try { return (localStorage.getItem('zamil_otp_tone') as ToneId) || 'sms'; } catch { return 'sms'; }
 };
 export const saveTone = (id: ToneId) => {
   try { localStorage.setItem('zamil_otp_tone', id); } catch {}
 };
+// ── Session-applied tone: "apply now" override, falls back to saved tone ──
+let activeTone: ToneId | null = null;
+export const setActiveTone = (id: ToneId) => { activeTone = id; };
+export const getActiveTone = (): ToneId => activeTone || getSavedTone();
 // === EOF: sounds.ts ===
