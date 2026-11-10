@@ -129,4 +129,7 @@ h1,h2,h3,.font-heading { font-family:var(--font-heading); }
 .avatar-crown { transform-origin: center bottom; animation: crownBounce 2s ease-in-out infinite; }
 .podium-shine { background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.3) 50%, transparent 100%); background-size: 200% 100%; animation: podiumShine 3s linear infinite; }
 .confetti-piece { animation: confettiFall 2s ease-in infinite; }
-/* === EOF: index.css leaderboard animations === */
+/* === EOF: index.css leaderboard animations === *//* === OTP floating card 3s countdown bar === */
+@keyframes otpTimer { from { width: 100%; } to { width: 0%; } }
+.otp-timer-bar { animation: otpTimer 3s linear forwards; }
+/* === EOF append === */
