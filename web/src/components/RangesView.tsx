@@ -68,22 +68,22 @@ export const RangesView: React.FC<RangesViewProps> = ({ ranges, smsCountToday, o
       <PageHead title="Ranges" chip={ranges.length} />
 
       {/* ── Live OTP Banner ── */}
-      <div className="relative overflow-hidden rounded-2xl p-3 flex items-center gap-3 bg-gradient-to-br from-sky-400 via-blue-500 to-indigo-500 shadow-lg shadow-blue-500/25 text-white">
-        <span className="lb-spark absolute text-white/70 text-[10px] top-2 right-8 pointer-events-none">✦</span>
-        <span className="lb-spark absolute text-white/60 text-[9px] bottom-2 right-16 pointer-events-none" style={{ animationDelay: '1.2s' }}>✦</span>
-        <span className="relative flex h-2 w-2 shrink-0">
-          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-300 opacity-75" />
-          <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-300" />
-        </span>
-        <div className="flex-1 min-w-0">
-          <div className="text-[9px] font-bold uppercase tracking-wider text-white/80">Live OTP · today</div>
-          <div className="font-heading font-extrabold text-2xl leading-none tabular-nums">{liveToday.toLocaleString()}</div>
-        </div>
-        <button type="button" onClick={refreshLive} disabled={liveBusy}
-          className="w-8 h-8 rounded-xl bg-white/20 hover:bg-white/30 border border-white/30 flex items-center justify-center active:scale-95 transition-all cursor-pointer shrink-0" title="Refresh live count">
-          <RefreshCw className={`w-3.5 h-3.5 ${liveBusy ? 'animate-spin' : ''}`} />
-        </button>
-      </div>
+<div className="relative overflow-hidden rounded-2xl p-2 flex items-center gap-3 bg-gradient-to-br from-sky-400 via-blue-500 to-indigo-500 shadow-lg shadow-blue-500/25 text-white">
+  <span className="lb-spark absolute text-white/70 text-[10px] top-2 right-8 pointer-events-none">✦</span>
+  {/* 📬 icon block beside the counter */}
+  <div className="w-11 h-11 rounded-2xl bg-white/20 border border-white/30 backdrop-blur-sm flex items-center justify-center shrink-0 text-[26px] leading-none">📬</div>
+  <div className="flex-1 min-w-0">
+    <div className="text-[9px] font-bold uppercase tracking-wider text-white/80">Today's OTPs</div>
+    <div className="font-heading font-extrabold text-2xl leading-none tabular-nums">{liveToday.toLocaleString()}</div>
+    <div className="flex items-center gap-1.5 mt-1 text-[9px] font-bold text-white/85">
+      <span className="w-1.5 h-1.5 rounded-full bg-emerald-300 dot-live" /> Live · auto-updating
+    </div>
+  </div>
+  <button type="button" onClick={refreshLive} disabled={liveBusy}
+    className="w-8 h-8 rounded-xl bg-white/20 hover:bg-white/30 border border-white/30 flex items-center justify-center active:scale-95 transition-all cursor-pointer shrink-0" title="Refresh live count">
+    <RefreshCw className={`w-3.5 h-3.5 ${liveBusy ? 'animate-spin' : ''}`} />
+  </button>
+</div>
 
       {/* ── Stat Strip ── */}
       <StatStrip items={[
