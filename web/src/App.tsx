@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from './context/AuthContext';
 import { useToast } from './context/ToastContext';
+import { useLive } from './context/LiveContext';
 import { Header } from './components/Header';
 import { Navigation, ActiveTab } from './components/Navigation';
 import { RangesView } from './components/RangesView';
@@ -23,6 +24,7 @@ type AppSubPage = 'dashboard' | 'admin' | 'cli' | 'notifications' | 'password';
 function DashboardContent() {
   const { isLoggedIn } = useAuth();
   const { showToast } = useToast();
+  const live = useLive();
   const [activeTab, setActiveTab] = useState<ActiveTab>('ranges');
   const [subPage, setSubPage] = useState<AppSubPage>('dashboard');
   const [adminInitialTab, setAdminInitialTab] = useState<string>('scc');
@@ -39,10 +41,11 @@ function DashboardContent() {
   const [hasDorAccess, setHasDorAccess] = useState(false);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [latestOtpAlert, setLatestOtpAlert] = useState<{
-    number: string; cli: string; message: string; time: string;
+    number: string; cli: string; message: string; time: string; burst?: number;
   } | null>(null);
   const prevSmsCountRef = useRef<number>(0);
   const seenSmsKeysRef = useRef<Set<string>>(new Set());
+  const lastRangeFetchRef = useRef<number>(0);
 
   const fetchRanges = useCallback(async (force = false) => {
     try {
@@ -61,47 +64,43 @@ function DashboardContent() {
     } catch { showToast('Numbers load failed', 'error'); }
   }, [showToast]);
 
+  // Single ingest point: updates list + raises ONE floating card with burst count
+  const ingestSms = useCallback((count: number, rec: SmsMessage[]) => {
+    setTodaySmsCount(count);
+    setSmsMessages(rec);
+    const fresh = rec.filter((m) => !seenSmsKeysRef.current.has(`${m.number}|${m.cli}|${m.time}`));
+    if (fresh.length) {
+      fresh.forEach((m) => seenSmsKeysRef.current.add(`${m.number}|${m.cli}|${m.time}`));
+      if (prevSmsCountRef.current > 0) {
+        setLatestOtpAlert({ number: fresh[0].number, cli: fresh[0].cli, message: fresh[0].message, time: fresh[0].time, burst: fresh.length });
+      }
+    }
+    prevSmsCountRef.current = count;
+  }, []);
+
   const fetchSmsStream = useCallback(async () => {
     try {
       const res = await postApi<any>('/api/smscount');
+      if (res && res.ok) ingestSms(res.count ?? 0, Array.isArray(res.recent) ? res.recent : []);
+    } catch {}
+  }, [ingestSms]);
+
+  const fetchLeaderboard = useCallback(async (r = leaderboardRange) => {
+    try {
+      const res = await postApi<any>('/api/leaderboard', { range: r });
       if (res && res.ok) {
-        const count = res.count ?? 0;
-        setTodaySmsCount(count);
-        if (res.recent && Array.isArray(res.recent)) {
-          setSmsMessages(res.recent);
-          res.recent.forEach((msg: SmsMessage) => {
-            const key = `${msg.number}|${msg.cli}|${msg.time}`;
-            if (!seenSmsKeysRef.current.has(key)) {
-              seenSmsKeysRef.current.add(key);
-              if (prevSmsCountRef.current > 0) {
-                setLatestOtpAlert({ number: msg.number, cli: msg.cli, message: msg.message, time: msg.time });
-              }
-            }
-          });
-        }
-        prevSmsCountRef.current = count;
+        setLeaderboardData({
+          users: res.users || [],
+          me: res.me || null,
+          total: res.total || (res.users || []).length,
+          scope: res.scope,
+          teamName: res.teamName,
+          mode: res.mode,
+          secondary: res.secondary || []
+        });
       }
     } catch {}
-  }, []);
-
-  
-const fetchLeaderboard = useCallback(async (r = leaderboardRange) => {
-  try {
-    const res = await postApi<any>('/api/leaderboard', { range: r });
-    if (res && res.ok) {
-      setLeaderboardData({
-        users: res.users || [],
-        me: res.me || null,
-        total: res.total || (res.users || []).length,
-        scope: res.scope,
-        teamName: res.teamName,
-        mode: res.mode,
-        secondary: res.secondary || []
-      });
-    }
-  } catch {}
-}, [leaderboardRange]);
-
+  }, [leaderboardRange]);
 
   const fetchDOR = useCallback(async () => {
     try {
@@ -132,9 +131,36 @@ const fetchLeaderboard = useCallback(async (r = leaderboardRange) => {
     fetchNotifications();
     postApi<any>('/api/smscount-range', { range: 'week' }).then((r) => r?.ok && setWeekSmsCount(r.count || 0));
     postApi<any>('/api/smscount-range', { range: 'month' }).then((r) => r?.ok && setMonthSmsCount(r.count || 0));
-    const interval = setInterval(() => { if (!document.hidden) fetchSmsStream(); }, 5000);
-    return () => clearInterval(interval);
   }, [isLoggedIn, fetchRanges, fetchSmsStream, checkDorAccess, fetchNotifications]);
+
+  // ── SSE bridge: live SMS feed replaces the old 5s polling ──
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    const rec = live.sms?.recent || [];
+    if (!rec.length && (live.sms?.count || 0) === 0) return;
+    ingestSms(live.sms.count || 0, rec);
+  }, [live.sms, isLoggedIn, ingestSms]);
+
+  // ── Auto-refresh when DB changes (new range / numbers / leaderboard) ──
+  useEffect(() => {
+    if (!isLoggedIn || !live.rangesV) return;
+    const now = Date.now();
+    if (now - lastRangeFetchRef.current < 8000) return; // throttle bursts
+    lastRangeFetchRef.current = now;
+    fetchRanges(false);
+  }, [live.rangesV, isLoggedIn, fetchRanges]);
+
+  useEffect(() => {
+    if (!isLoggedIn || !live.numbersV || !selectedRange) return;
+    fetchNumbers(selectedRange);
+  }, [live.numbersV, isLoggedIn, selectedRange, fetchNumbers]);
+
+  useEffect(() => {
+    if (!isLoggedIn || !live.lbV) return;
+    fetchLeaderboard(leaderboardRange);
+  }, [live.lbV, isLoggedIn, fetchLeaderboard, leaderboardRange]);
+
+  const dismissOtp = useCallback(() => setLatestOtpAlert(null), []);
 
   const handleSelectRange = (range: RangeItem) => {
     setSelectedRange(range);
@@ -153,9 +179,7 @@ const fetchLeaderboard = useCallback(async (r = leaderboardRange) => {
   };
 
   if (!isLoggedIn) return <LoginView />;
-
   const unreadCount = notifications.filter((n) => !n.read).length;
-
   return (
     <div className="min-h-screen w-full max-w-full overflow-x-hidden bg-slate-50 dark:bg-[#0b1120] text-slate-900 dark:text-slate-100 flex flex-col transition-colors selection:bg-cyan-500 selection:text-white">
       <Header
@@ -215,7 +239,7 @@ const fetchLeaderboard = useCallback(async (r = leaderboardRange) => {
         smsCountToday={todaySmsCount}
         hasDorAccess={hasDorAccess}
       />
-      <LiveOtpFloatingCard message={latestOtpAlert} onDismiss={() => setLatestOtpAlert(null)} />
+      <LiveOtpFloatingCard message={latestOtpAlert} onDismiss={dismissOtp} />
     </div>
   );
 }
@@ -223,3 +247,4 @@ const fetchLeaderboard = useCallback(async (r = leaderboardRange) => {
 export default function App() {
   return <DashboardContent />;
 }
+// === EOF: App.tsx ===
