@@ -30,17 +30,12 @@ R.post('/api/smscount', A.verify, async (req, res) => {
   ok(res, { count: c.rows[0].t, recent: r.rows });
 });
 
+// FIX: week/month are now computed live from CDR history (7 / 30 day windows),
+// so they match the Admin Hub OTP report exactly (no more stale otp_counters).
 R.post('/api/smscount-range', A.verify, async (req, res) => {
   const u = req.user, alt = u.clientName || u.username, rg = req.body.range;
-  if (rg === 'week' || rg === 'month') {
-    // Use persistent counter for week/month
-    const r = await q("SELECT otp_week, otp_month FROM otp_counters WHERE username=$1", [u.username.toLowerCase()]);
-    const count = r.rows[0] ? (rg === 'week' ? r.rows[0].otp_week : r.rows[0].otp_month) : 0;
-    return ok(res, { count, byNumber: {}, byRange: {} });
-  }
-  
-  // For 'today', query live sms_cdr
-  const c = await q("SELECT COUNT(*)::int t FROM sms_cdr WHERE time >= " + PKT_DAY + " AND (LOWER(client)=LOWER($1) OR LOWER(client)=LOWER($2))", [u.username, alt]);
+  const win = rg === 'week' ? " - interval '6 days'" : rg === 'month' ? " - interval '29 days'" : '';
+  const c = await q("SELECT COUNT(*)::int t FROM sms_cdr WHERE time >= " + PKT_DAY + win + " AND (LOWER(client)=LOWER($1) OR LOWER(client)=LOWER($2))", [u.username, alt]);
   ok(res, { count: c.rows[0].t, byNumber: {}, byRange: {} });
 });
 
@@ -66,10 +61,12 @@ R.post('/api/leaderboard', A.verify, async (req, res) => {
     );
     rows = r.rows;
   } else {
-    const col = rg === 'week' ? 'otp_week' : 'otp_month';
-
+    // FIX: live 7 / 30 day windows instead of stale otp_counters
+    const win = rg === 'week' ? " - interval '6 days'" : " - interval '29 days'";
     const r = await q(
-      `SELECT username, ${col} AS count FROM otp_counters WHERE ${col} > 0 ORDER BY ${col} DESC LIMIT 50`
+      "SELECT client AS username, COUNT(*)::int AS count FROM sms_cdr WHERE time >= " +
+      PKT_DAY + win +
+      " AND client IS NOT NULL AND client<>'' AND LOWER(client)<>'system generated' GROUP BY 1 ORDER BY 2 DESC LIMIT 50"
     );
     rows = r.rows;
   }
@@ -226,7 +223,7 @@ R.post('/api/dor', A.verify, async (req, res) => {
 });
 
 // CLI Insights — computed from sms_cdr (zero scraping)
-R.post('/api/cli/gate', A.verify, async (req, res) => { const un = String(req.user.username).toLowerCase(); if (A.isAdminish(await A.getRole(un))) return ok(res, { insights: true }); const r = await q("SELECT allowed FROM cli_access WHERE username=$1", [un]); return ok(res, { insights: !!r.rows[0]?.allowed }); }); 
+R.post('/api/cli/gate', A.verify, async (req, res) => { const un = String(req.user.username).toLowerCase(); if (A.isAdminish(await A.getRole(un))) return ok(res, { insights: true }); const r = await q("SELECT allowed FROM cli_access WHERE username=$1", [un]); return ok(res, { insights: !!r.rows[0]?.allowed }); }); 
 R.post('/api/cli/refresh', A.verify, (req, res) => ok(res));
 R.post('/api/cli/analysis', A.verify, async (req, res) => { const unG = String(req.user.username).toLowerCase(); if (!A.isAdminish(await A.getRole(unG))) { const g = await q("SELECT allowed FROM cli_access WHERE username=$1", [unG]); if (!g.rows[0]?.allowed) return res.status(403).json({ ok: false, error: 'CLI not enabled for you' }); }
   const tot = await q("SELECT COUNT(*)::int s, COUNT(DISTINCT cli)::int c FROM sms_cdr WHERE time >= " + PKT_DAY);
@@ -267,3 +264,4 @@ R.post('/api/stats', A.verify, async (req, res) => {
   ok(res, { totalCountries: countries.length, totalRanges: rr.rows.length, totalNumbers: t.rows[0].f + t.rows[0].a, allocated: t.rows[0].a, available: t.rows[0].f, otpToday, otpWeek, otpMonth, mostActiveRange, mostActiveCount, countries });
 });
 module.exports = R;
+// === EOF: user.js ===
