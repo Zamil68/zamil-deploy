@@ -4,15 +4,14 @@ import { stripCC, stripPlus, getCountryFlag, splitRangeName } from '../utils/cou
 import { useToast } from '../context/ToastContext';
 import { postApi } from '../services/api';
 import { ArrowLeft, Copy, Check, Search, RefreshCw, Eye, EyeOff, Filter, PhoneCall, X } from 'lucide-react';
-
 interface NumbersViewProps {
   range: RangeItem;
   numbers: string[];
+  liveTick?: number; // FIX: bumps when a per-number OTP counter increments (live)
   onBack: () => void;
   onRefresh: () => Promise<void>;
 }
-
-export const NumbersView: React.FC<NumbersViewProps> = ({ range, numbers, onBack, onRefresh }) => {
+export const NumbersView: React.FC<NumbersViewProps> = ({ range, numbers, liveTick = 0, onBack, onRefresh }) => {
   const { showToast } = useToast();
   const [searchQuery, setSearchQuery] = useState('');
   const [isStrippedCC, setIsStrippedCC] = useState(true);
@@ -23,9 +22,20 @@ export const NumbersView: React.FC<NumbersViewProps> = ({ range, numbers, onBack
   const [numberDetailsModal, setNumberDetailsModal] = useState<{ number: string; count: number; recent: any[] } | null>(null);
   const [isCopyingAll, setIsCopyingAll] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
-
+  // ── FIX: per-number live OTP counters (start on copy, max 30) ──
+  const otpStart = useMemo(() => { try { return JSON.parse(localStorage.getItem('zamil_numotp_start') || '{}'); } catch { return {}; } }, [liveTick, copiedNumbers]);
+  const otpCount = useMemo(() => { try { return JSON.parse(localStorage.getItem('zamil_numotp_count') || '{}'); } catch { return {}; } }, [liveTick, copiedNumbers]);
+  const startCounter = (nums: string[]) => {
+    try {
+      const s = JSON.parse(localStorage.getItem('zamil_numotp_start') || '{}');
+      const c = JSON.parse(localStorage.getItem('zamil_numotp_count') || '{}');
+      const now = Date.now();
+      nums.forEach((n) => { s[n] = now; c[n] = 0; });
+      localStorage.setItem('zamil_numotp_start', JSON.stringify(s));
+      localStorage.setItem('zamil_numotp_count', JSON.stringify(c));
+    } catch {}
+  };
   const hasTerritorySplit = useMemo(() => numbers.some((n) => n.includes('970') || n.includes('972')), [numbers]);
-
   const filteredNumbers = useMemo(() => {
     const q = searchQuery.trim();
     return numbers.filter((num) => {
@@ -37,7 +47,6 @@ export const NumbersView: React.FC<NumbersViewProps> = ({ range, numbers, onBack
       return num.includes(q) || stripped.includes(q);
     });
   }, [numbers, searchQuery, territoryFilter]);
-
   const handleCopySingle = async (numDisplay: string, numRaw: string) => {
     try {
       await navigator.clipboard.writeText(numDisplay);
@@ -46,11 +55,11 @@ export const NumbersView: React.FC<NumbersViewProps> = ({ range, numbers, onBack
         try { localStorage.setItem(`zamil_copied_${range.id}`, JSON.stringify(Array.from(next))); } catch {}
         return next;
       });
+      startCounter([numRaw]); // FIX: counter begins at 0/30 from this moment
       showToast(`✓ ${numDisplay}`, 'success');
       postApi('/api/numbers/mark-used', { number: numRaw }).catch(() => {});
     } catch { showToast('Clipboard blocked', 'error'); }
   };
-
   const handleCopyAll = async () => {
     const listToCopy = filteredNumbers.map((n) => (isStrippedCC ? stripCC(n) : n));
     if (!listToCopy.length) return;
@@ -63,20 +72,18 @@ export const NumbersView: React.FC<NumbersViewProps> = ({ range, numbers, onBack
         try { localStorage.setItem(`zamil_copied_${range.id}`, JSON.stringify(Array.from(next))); } catch {}
         return next;
       });
+      startCounter(filteredNumbers); // FIX: all copied numbers start counting
       showToast(`✓ ${listToCopy.length} copied`, 'success');
     } catch { showToast('Copy failed', 'error'); }
     finally { setTimeout(() => setIsCopyingAll(false), 1200); }
   };
-
   const openNumberDetails = async (rawNum: string) => {
     try {
       const res = await postApi<any>('/api/number-smscount', { number: rawNum });
       if (res && res.ok) setNumberDetailsModal({ number: rawNum, count: res.count || 0, recent: res.recent || [] });
     } catch { showToast('Details failed', 'error'); }
   };
-
   const rangeCountry = splitRangeName(range.title).country;
-
   return (
     <div className="w-full max-w-full overflow-hidden space-y-3 pb-20">
       <div className="flex items-center justify-between gap-2 px-1">
@@ -132,16 +139,24 @@ export const NumbersView: React.FC<NumbersViewProps> = ({ range, numbers, onBack
         {filteredNumbers.map((rawNum, idx) => {
           const displayNum = isStrippedCC ? stripCC(rawNum) : rawNum;
           const isCopied = copiedNumbers.has(rawNum);
+          // FIX: counter chip — "start" before first copy, then live n/30 after
+          const started = otpStart[rawNum] != null || isCopied;
+          const cv = Math.min(30, otpCount[rawNum] || 0);
           return (
             <div key={rawNum} onClick={() => handleCopySingle(displayNum, rawNum)}
               className={`p-2.5 rounded-xl transition-all flex items-center justify-between gap-2 cursor-pointer group border ${
                 isCopied ? 'bg-rose-50/70 dark:bg-rose-950/25 border-rose-200 dark:border-rose-900/40 text-rose-900 dark:text-rose-200'
-                         : 'glass-card border-slate-200/80 dark:border-slate-800 hover:border-cyan-500/40 hover:shadow-sm text-slate-800 dark:text-slate-100'}`}>
+                : 'glass-card border-slate-200/80 dark:border-slate-800 hover:border-cyan-500/40 hover:shadow-sm text-slate-800 dark:text-slate-100'}`}>
               <div className="flex items-center gap-2 min-w-0 flex-1">
                 <span className="font-mono text-[10px] text-slate-400 font-bold shrink-0 w-5 text-right">{idx + 1}</span>
                 <span className={`font-mono text-xs font-bold tracking-tight truncate ${isCopied ? 'line-through decoration-rose-400 text-rose-600 dark:text-rose-400' : ''}`}>{displayNum}</span>
               </div>
               <div className="flex items-center gap-1 shrink-0">
+                {started ? (
+                  <span className={`px-1.5 py-0.2 rounded text-[8px] font-bold font-mono border ${cv >= 30 ? 'bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/20' : 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20'}`}>{cv}/30</span>
+                ) : (
+                  <span className="px-1.5 py-0.2 rounded text-[8px] font-bold uppercase tracking-wider text-slate-400 border border-slate-200 dark:border-slate-700">start</span>
+                )}
                 {isCopied && <span className="px-1.5 py-0.2 rounded text-[8px] font-bold uppercase bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/20">USED</span>}
                 <button type="button" onClick={(e) => { e.stopPropagation(); openNumberDetails(rawNum); }}
                   className="p-1 rounded text-slate-400 hover:text-cyan-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer" title="SMS stats">
