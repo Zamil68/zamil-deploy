@@ -7,9 +7,9 @@ const ok = (res, d = {}) => res.json({ ok: true, ...d });
 const countryOf = t => { const m = String(t || '').match(/^(.+?)[\s-](?:LX|MX|RX|DC)\b/i) || String(t || '').match(/^([A-Za-z\s]+?)\d/); return (m && m[1] ? m[1] : String(t || '')).trim(); };
 
 R.post('/api/ranges', A.verify, async (req, res) => {
-const u = req.user, alt = u.clientName || u.username;
-const r = await q("SELECT p.range_id AS id, COALESCE(r.name,p.range_id) AS title, COALESCE(r.prefix,'') AS prefix, COUNT(*)::int AS count FROM pool_numbers p LEFT JOIN ranges r ON r.range_id=p.range_id WHERE p.status='assigned' AND (LOWER(p.client_id)=LOWER($1) OR LOWER(p.client_id)=LOWER($2)) GROUP BY 1,2,3 ORDER BY 2", [u.username, alt]);
-ok(res, { ranges: r.rows.map(x => ({ id: x.id, title: x.title, prefix: x.prefix, country: countryOf(x.title), count: x.count })) });
+  const u = req.user, alt = u.clientName || u.username;
+  const r = await q("SELECT p.range_id AS id, COALESCE(r.name,p.range_id) AS title, COALESCE(r.prefix,'') AS prefix, COUNT(*)::int AS count FROM pool_numbers p LEFT JOIN ranges r ON r.range_id=p.range_id WHERE p.status='assigned' AND (LOWER(p.client_id)=LOWER($1) OR LOWER(p.client_id)=LOWER($2)) GROUP BY 1,2,3 ORDER BY 2", [u.username, alt]);
+  ok(res, { ranges: r.rows.map(x => ({ id: x.id, title: x.title, prefix: x.prefix, country: countryOf(x.title), count: x.count })) });
 });
 
 R.post('/api/numbers', A.verify, async (req, res) => {
@@ -30,13 +30,20 @@ R.post('/api/smscount', A.verify, async (req, res) => {
   ok(res, { count: c.rows[0].t, recent: r.rows });
 });
 
-// FIX: week/month are now computed live from CDR history (7 / 30 day windows),
-// so they match the Admin Hub OTP report exactly (no more stale otp_counters).
+// FIX (CDR retention): raw sms_cdr rows now live ONLY for the current PKT day.
+// Week/Month = today's live count + stored per-user day counters in otp_daily.
 R.post('/api/smscount-range', A.verify, async (req, res) => {
   const u = req.user, alt = u.clientName || u.username, rg = req.body.range;
-  const win = rg === 'week' ? " - interval '6 days'" : rg === 'month' ? " - interval '29 days'" : '';
-  const c = await q("SELECT COUNT(*)::int t FROM sms_cdr WHERE time >= " + PKT_DAY + win + " AND (LOWER(client)=LOWER($1) OR LOWER(client)=LOWER($2))", [u.username, alt]);
-  ok(res, { count: c.rows[0].t, byNumber: {}, byRange: {} });
+  if (rg !== 'week' && rg !== 'month') {
+    const c = await q("SELECT COUNT(*)::int t FROM sms_cdr WHERE time >= " + PKT_DAY + " AND (LOWER(client)=LOWER($1) OR LOWER(client)=LOWER($2))", [u.username, alt]);
+    return ok(res, { count: c.rows[0].t, byNumber: {}, byRange: {} });
+  }
+  const days = rg === 'week' ? 6 : 29;
+  const r = await q(
+    "SELECT (SELECT COUNT(*)::int FROM sms_cdr WHERE time >= " + PKT_DAY + " AND (LOWER(client)=LOWER($2) OR LOWER(client)=LOWER($3))) + " +
+    "(SELECT COALESCE(SUM(count),0)::int FROM otp_daily WHERE day >= DATE(" + PKT_DAY + ") - $1 AND day < DATE(" + PKT_DAY + ") AND username IN (LOWER($2), LOWER($3))) AS t",
+    [days, u.username, alt]);
+  ok(res, { count: r.rows[0].t, byNumber: {}, byRange: {} });
 });
 
 R.post('/api/number-smscount', A.verify, async (req, res) => {
@@ -47,12 +54,11 @@ R.post('/api/number-smscount', A.verify, async (req, res) => {
   ok(res, { number: n, count: c.rows[0].t, recent: r.rows });
 });
 
-
 R.post('/api/leaderboard', A.verify, async (req, res) => {
   const rg = req.body.range || 'today';
   let rows = [];
 
-  // 1. Get leaderboard data
+  // 1. Get leaderboard data (today = live raw rows; week/month = today's live + otp_daily stored counters)
   if (rg === 'today') {
     const r = await q(
       "SELECT client AS username, COUNT(*)::int AS count FROM sms_cdr WHERE time >= " +
@@ -61,13 +67,15 @@ R.post('/api/leaderboard', A.verify, async (req, res) => {
     );
     rows = r.rows;
   } else {
-    // FIX: live 7 / 30 day windows instead of stale otp_counters
-    const win = rg === 'week' ? " - interval '6 days'" : " - interval '29 days'";
+    // FIX (CDR retention): merge today's live counts with the stored per-user day counters
+    const days = rg === 'week' ? 6 : 29;
     const r = await q(
-      "SELECT client AS username, COUNT(*)::int AS count FROM sms_cdr WHERE time >= " +
-      PKT_DAY + win +
-      " AND client IS NOT NULL AND client<>'' AND LOWER(client)<>'system generated' GROUP BY 1 ORDER BY 2 DESC LIMIT 50"
-    );
+      "SELECT COALESCE(t.username, p.username) AS username, (COALESCE(t.c,0) + COALESCE(p.c,0))::int AS count FROM " +
+      "(SELECT LOWER(client) AS username, COUNT(*)::int c FROM sms_cdr WHERE time >= " + PKT_DAY +
+      " AND client IS NOT NULL AND client<>'' AND LOWER(client)<>'system generated' GROUP BY 1) t " +
+      "FULL OUTER JOIN " +
+      "(SELECT username, SUM(count)::int c FROM otp_daily WHERE day >= DATE(" + PKT_DAY + ") - $1 AND day < DATE(" + PKT_DAY + ") AND username<>'system generated' GROUP BY 1) p " +
+      "ON t.username = p.username ORDER BY 2 DESC LIMIT 50", [days]);
     rows = r.rows;
   }
 
@@ -78,13 +86,10 @@ R.post('/api/leaderboard', A.verify, async (req, res) => {
 
   // 3. Build secondary team leaderboard
   const teamAgg = {};
-
   rows.forEach(row => {
     const un = String(row.username).toLowerCase();
-
     let tk = 'SYS';
     let tl = 'System Generated';
-
     for (const p of prefRows.rows) {
       if (p.prefix && un.startsWith(p.prefix.toLowerCase())) {
         tk = p.prefix;
@@ -92,7 +97,6 @@ R.post('/api/leaderboard', A.verify, async (req, res) => {
         break;
       }
     }
-
     if (!teamAgg[tk]) {
       teamAgg[tk] = {
         team: tk,
@@ -101,9 +105,7 @@ R.post('/api/leaderboard', A.verify, async (req, res) => {
         top: null
       };
     }
-
     teamAgg[tk].count += Number(row.count) || 0;
-
     if (!teamAgg[tk].top || row.count > teamAgg[tk].top.count) {
       teamAgg[tk].top = {
         username: row.username,
@@ -111,25 +113,22 @@ R.post('/api/leaderboard', A.verify, async (req, res) => {
       };
     }
   });
-
   const secondary = Object.values(teamAgg)
     .sort((a, b) => b.count - a.count)
     .slice(0, 10);
 
   // 4. Find current user's rank
+  // FIX ("me" matching): exact match ONLY. The old includes() check could stick the YOU badge
+  // on the wrong person (e.g. 'ali' matched 'zml_alice').
   const meKeys = [
     req.user.clientName,
     req.user.username
   ].map(x => String(x || '').toLowerCase()).filter(Boolean);
-
   let me = null;
-
   const users = rows.map((row, i) => {
     const un = String(row.username).toLowerCase();
     const curRank = i + 1;
-
     const achs = [];
-
     if (curRank === 1) {
       achs.push({
         id: 'champ',
@@ -147,13 +146,11 @@ R.post('/api/leaderboard', A.verify, async (req, res) => {
         color: 'cyan'
       });
     }
-
     const percentile = Math.max(
       1,
       Math.round((1 - curRank / Math.max(rows.length, 1)) * 100)
     );
-
-    if (meKeys.some(m => un === m || un.includes(m) || m.includes(un))) {
+    if (!me && meKeys.some(m => un === m)) {
       me = {
         rank: curRank,
         username: row.username,
@@ -164,7 +161,6 @@ R.post('/api/leaderboard', A.verify, async (req, res) => {
         percentile
       };
     }
-
     return {
       ...row,
       rank: curRank,
@@ -176,10 +172,21 @@ R.post('/api/leaderboard', A.verify, async (req, res) => {
     };
   });
 
+  // 4b. FIX: user ranked OUTSIDE Top 50 → compute own count + real rank from the full set (today only)
+  if (!me && rg === 'today') {
+    const mc = await q("SELECT COUNT(*)::int c FROM sms_cdr WHERE time >= " + PKT_DAY + " AND (LOWER(client)=LOWER($1) OR LOWER(client)=LOWER($2))", [req.user.username, req.user.clientName || req.user.username]);
+    const myCount = mc.rows[0].c;
+    if (myCount > 0) {
+      const rk = await q("SELECT COUNT(*)::int n FROM (SELECT 1 FROM sms_cdr WHERE time >= " + PKT_DAY + " AND client IS NOT NULL AND client<>'' AND LOWER(client)<>'system generated' GROUP BY client HAVING COUNT(*) > $1) x", [myCount]);
+      const myRank = rk.rows[0].n + 1;
+      me = { rank: myRank, username: req.user.username, count: myCount, rankChange: 0, streak: 0, achievements: [], percentile: Math.max(1, Math.round((1 - myRank / Math.max(rows.length, myRank, 1)) * 100)) };
+    }
+  }
+
   // 5. Find user's team prefix
   const userPrefix = prefRows.rows.find(
     p => p.prefix &&
-    String(req.user.username).toLowerCase().startsWith(p.prefix.toLowerCase())
+      String(req.user.username).toLowerCase().startsWith(p.prefix.toLowerCase())
   )?.prefix || '';
 
   // 6. Return response
@@ -195,7 +202,6 @@ R.post('/api/leaderboard', A.verify, async (req, res) => {
   });
 });
 
-
 R.post('/api/numbers/mark-used', A.verify, async (req, res) => {
   const number = String(req.body.number || '').replace(/[^0-9+]/g, '');
   if (!number) return res.status(400).json({ ok: false, error: 'number required' });
@@ -205,17 +211,23 @@ R.post('/api/numbers/mark-used', A.verify, async (req, res) => {
     [number, req.user.username, rid, rname, req.user.username]);
   ok(res, { marked: true });
 });
+
 R.post('/api/numbers/used-list', A.verify, async (req, res) => {
   const r = await q("SELECT number FROM number_usage WHERE client=$1 LIMIT 20000", [req.user.username]);
   ok(res, { used: r.rows.map(x => x.number) });
 });
 
-// DOR — global ops feed (super/admin only)
+// DOR — global ops feed
+// FIX: admins/super always see the DOR tab (the /api/dor data endpoint already allows them);
+// normal users see it only when dor_allowed=true — backend stays in full control of visibility.
 R.post('/api/dor/access', A.verify, async (req, res) => {
-    const r = await q("SELECT dor_allowed FROM user_creds WHERE username=$1", [req.user.username.toLowerCase()]);
-    const allowed = r.rows[0]?.dor_allowed || false;
-    ok(res, { allowed });
-  });
+  const un = String(req.user.username).toLowerCase();
+  if (A.isAdminish(await A.getRole(un))) return ok(res, { allowed: true });
+  const r = await q("SELECT dor_allowed FROM user_creds WHERE username=$1", [un]);
+  const allowed = r.rows[0]?.dor_allowed || false;
+  ok(res, { allowed });
+});
+
 R.post('/api/dor', A.verify, async (req, res) => {
   { const _r=await A.getRole(req.user.username); const _d=await q("SELECT dor_allowed FROM user_creds WHERE username=$1",[String(req.user.username).toLowerCase()]); if(!A.isAdminish(_r) && !_d.rows[0]?.dor_allowed) return res.status(403).json({ ok:false, error:'DOR not enabled' }); }
   const r = await q("SELECT to_char(time AT TIME ZONE 'UTC','HH24:MI:SS') AS time, time AS datetime, number, cli, content AS message, client, range FROM sms_cdr WHERE time >= " + PKT_DAY + " ORDER BY time DESC LIMIT 200");
@@ -223,7 +235,7 @@ R.post('/api/dor', A.verify, async (req, res) => {
 });
 
 // CLI Insights — computed from sms_cdr (zero scraping)
-R.post('/api/cli/gate', A.verify, async (req, res) => { const un = String(req.user.username).toLowerCase(); if (A.isAdminish(await A.getRole(un))) return ok(res, { insights: true }); const r = await q("SELECT allowed FROM cli_access WHERE username=$1", [un]); return ok(res, { insights: !!r.rows[0]?.allowed }); }); 
+R.post('/api/cli/gate', A.verify, async (req, res) => { const un = String(req.user.username).toLowerCase(); if (A.isAdminish(await A.getRole(un))) return ok(res, { insights: true }); const r = await q("SELECT allowed FROM cli_access WHERE username=$1", [un]); return ok(res, { insights: !!r.rows[0]?.allowed }); });
 R.post('/api/cli/refresh', A.verify, (req, res) => ok(res));
 R.post('/api/cli/analysis', A.verify, async (req, res) => { const unG = String(req.user.username).toLowerCase(); if (!A.isAdminish(await A.getRole(unG))) { const g = await q("SELECT allowed FROM cli_access WHERE username=$1", [unG]); if (!g.rows[0]?.allowed) return res.status(403).json({ ok: false, error: 'CLI not enabled for you' }); }
   const tot = await q("SELECT COUNT(*)::int s, COUNT(DISTINCT cli)::int c FROM sms_cdr WHERE time >= " + PKT_DAY);
@@ -244,7 +256,7 @@ R.post('/api/cli/analysis', A.verify, async (req, res) => { const unG = String(r
   });
 });
 
-// Stats overview (pool truth; OTP totals super/admin only)
+// Stats overview (pool truth; OTP totals super/admin only) — NOTE: unused by the new UI, kept as-is
 R.post('/api/stats', A.verify, async (req, res) => {
   const role = await A.getRole(req.user.username);
   const isSuper = role === 'super';
@@ -263,5 +275,6 @@ R.post('/api/stats', A.verify, async (req, res) => {
   }
   ok(res, { totalCountries: countries.length, totalRanges: rr.rows.length, totalNumbers: t.rows[0].f + t.rows[0].a, allocated: t.rows[0].a, available: t.rows[0].f, otpToday, otpWeek, otpMonth, mostActiveRange, mostActiveCount, countries });
 });
+
 module.exports = R;
 // === EOF: user.js ===
