@@ -18,13 +18,10 @@ import { LiveOtpFloatingCard } from './components/LiveOtpFloatingCard';
 import { LoginView } from './components/LoginView';
 import { postApi } from './services/api';
 import type { RangeItem, SmsMessage, LeaderboardData, NotificationItem } from './types';
-
 type AppSubPage = 'dashboard' | 'admin' | 'cli' | 'notifications' | 'password';
-
 // Zoom: 1 = normal (current system look). + zooms in, − zooms out. User side only.
 const ZOOM_MIN = 0.8, ZOOM_MAX = 1.5;
 const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(z * 10) / 10));
-
 function DashboardContent() {
   const { isLoggedIn, username } = useAuth();
   const { showToast } = useToast();
@@ -51,7 +48,6 @@ function DashboardContent() {
   const prevSmsCountRef = useRef<number>(0);
   const seenSmsKeysRef = useRef<Set<string>>(new Set());
   const lastRangeFetchRef = useRef<number>(0);
-
   // ── Per-user zoom preference (remembered on this device, each user picks their own) ──
   useEffect(() => {
     try {
@@ -59,20 +55,17 @@ function DashboardContent() {
       setZoom(isNaN(v) ? 1 : clampZoom(v));
     } catch { setZoom(1); }
   }, [username]);
-
   const changeZoom = useCallback((z: number) => {
     const c = clampZoom(z);
     setZoom(c);
     try { localStorage.setItem('zamil_zoom_' + (username || ''), String(c)); } catch {}
   }, [username]);
-
   const fetchRanges = useCallback(async (force = false) => {
     try {
       const res = await postApi<any>('/api/ranges', { forceRefresh: force });
       if (res && res.ok && res.ranges) setRanges(res.ranges);
     } catch {}
   }, []);
-
   const fetchNumbers = useCallback(async (range: RangeItem) => {
     try {
       const res = await postApi<any>('/api/numbers', { rangeId: range.id, rangeTitle: range.title, limit: 500 });
@@ -82,7 +75,6 @@ function DashboardContent() {
       }
     } catch { showToast('Numbers load failed', 'error'); }
   }, [showToast]);
-
   // Single ingest point: updates list + raises ONE floating card with burst count
   const ingestSms = useCallback((count: number, rec: SmsMessage[]) => {
     setTodaySmsCount(count);
@@ -96,14 +88,12 @@ function DashboardContent() {
     }
     prevSmsCountRef.current = count;
   }, []);
-
   const fetchSmsStream = useCallback(async () => {
     try {
       const res = await postApi<any>('/api/smscount');
       if (res && res.ok) ingestSms(res.count ?? 0, Array.isArray(res.recent) ? res.recent : []);
     } catch {}
   }, [ingestSms]);
-
   const fetchLeaderboard = useCallback(async (r = leaderboardRange) => {
     try {
       const res = await postApi<any>('/api/leaderboard', { range: r });
@@ -120,28 +110,24 @@ function DashboardContent() {
       }
     } catch {}
   }, [leaderboardRange]);
-
   const fetchDOR = useCallback(async () => {
     try {
       const res = await postApi<any>('/api/dor');
       if (res && res.ok && res.recent) setDorMessages(res.recent);
     } catch {}
   }, []);
-
   const checkDorAccess = useCallback(async () => {
     try {
       const res = await postApi<any>('/api/dor/access');
       if (res && res.ok) setHasDorAccess(!!res.allowed);
     } catch {}
   }, []);
-
   const fetchNotifications = useCallback(async () => {
     try {
       const res = await postApi<any>('/api/notifs/list');
       if (res && res.ok && res.notifs) setNotifications(res.notifs);
     } catch {}
   }, []);
-
   useEffect(() => {
     if (!isLoggedIn) return;
     fetchRanges();
@@ -151,7 +137,6 @@ function DashboardContent() {
     postApi<any>('/api/smscount-range', { range: 'week' }).then((r) => r?.ok && setWeekSmsCount(r.count || 0));
     postApi<any>('/api/smscount-range', { range: 'month' }).then((r) => r?.ok && setMonthSmsCount(r.count || 0));
   }, [isLoggedIn, fetchRanges, fetchSmsStream, checkDorAccess, fetchNotifications]);
-
   // ── SSE bridge: live SMS feed replaces the old 5s polling ──
   useEffect(() => {
     if (!isLoggedIn) return;
@@ -159,7 +144,6 @@ function DashboardContent() {
     if (!rec.length && (live.sms?.count || 0) === 0) return;
     ingestSms(live.sms.count || 0, rec);
   }, [live.sms, isLoggedIn, ingestSms]);
-
   // ── Auto-refresh when DB changes (new range / numbers / leaderboard) ──
   useEffect(() => {
     if (!isLoggedIn || !live.rangesV) return;
@@ -168,25 +152,20 @@ function DashboardContent() {
     lastRangeFetchRef.current = now;
     fetchRanges(false);
   }, [live.rangesV, isLoggedIn, fetchRanges]);
-
   useEffect(() => {
     if (!isLoggedIn || !live.numbersV || !selectedRange) return;
     fetchNumbers(selectedRange);
   }, [live.numbersV, isLoggedIn, selectedRange, fetchNumbers]);
-
   useEffect(() => {
     if (!isLoggedIn || !live.lbV) return;
     fetchLeaderboard(leaderboardRange);
   }, [live.lbV, isLoggedIn, fetchLeaderboard, leaderboardRange]);
-
   const dismissOtp = useCallback(() => setLatestOtpAlert(null), []);
-
   const handleSelectRange = (range: RangeItem) => {
     setSelectedRange(range);
     setActiveTab('numbers');
     fetchNumbers(range);
   };
-
   const handleUnassignRange = async (rangeId: string, rangeTitle: string, count: number) => {
     try {
       const res = await postApi<any>('/api/range/unassign', { rangeId });
@@ -196,9 +175,8 @@ function DashboardContent() {
       }
     } catch { showToast('Unassign failed', 'error'); }
   };
-
   if (!isLoggedIn) return <LoginView />;
-  const unreadCount = notifications.filter((n) => !n.read).length;
+  const unreadCount = notifications.filter((n) => n.read).length;
   // Zoom applies to the user side only — Admin Hub / CLI Insights always stay at normal size
   const pageZoom = (subPage === 'admin' || subPage === 'cli') ? 1 : zoom;
   return (
@@ -258,7 +236,10 @@ function DashboardContent() {
         activeTab={activeTab}
         onTabChange={(tab) => {
           setSubPage('dashboard');
-          setActiveTab(tab);
+          // FIX: an open range stays open — tapping "Ranges" returns to its numbers view
+          // (the ← back button inside NumbersView is the only way to close it).
+          if (tab === 'ranges' && selectedRange) setActiveTab('numbers');
+          else setActiveTab(tab);
           if (tab === 'top10') fetchLeaderboard();
           if (tab === 'dor') fetchDOR();
         }}
@@ -269,7 +250,6 @@ function DashboardContent() {
     </div>
   );
 }
-
 export default function App() {
   return <DashboardContent />;
 }
