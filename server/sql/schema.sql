@@ -1,8 +1,15 @@
--- ZAMIL v3 schema (PostgreSQL). Run once: psql -d zamil_p1 -f schema.sql
+-- ZAMIL v3.1 schema (PostgreSQL). Run: psql -d zamil_p1 -f schema.sql
+-- Safe to re-run on an existing DB (all statements are IF NOT EXISTS).
+-- v3.1 adds: user_creds.dor_allowed, cli_access, kv_settings, otp_daily
+
 CREATE TABLE IF NOT EXISTS user_creds (
   username text PRIMARY KEY, pass_hash text, recovery_hash text,
   client_id text, client_name text,
+  dor_allowed boolean NOT NULL DEFAULT false,
   pwd_changed_at timestamptz, updated_at timestamptz DEFAULT now());
+-- For databases created BEFORE v3.1 (no-op on fresh installs):
+ALTER TABLE user_creds ADD COLUMN IF NOT EXISTS dor_allowed boolean NOT NULL DEFAULT false;
+
 CREATE TABLE IF NOT EXISTS user_roles (
   username text PRIMARY KEY, role text NOT NULL, added_by text, created_at timestamptz DEFAULT now());
 CREATE TABLE IF NOT EXISTS team_prefixes (
@@ -73,6 +80,29 @@ CREATE TABLE IF NOT EXISTS team_targets (
   top_n int, note text, updated_by text, updated_at timestamptz DEFAULT now());
 CREATE TABLE IF NOT EXISTS range_changelog (
   id bigserial PRIMARY KEY, action text, range_id text, name text, numbers int, ts timestamptz DEFAULT now());
+
+-- ── v3.1: CLI Insights per-user switch (used by /api/admin/cli-access, /api/admin/cli-access-list, /api/cli/gate) ──
+CREATE TABLE IF NOT EXISTS cli_access (
+  username   text PRIMARY KEY,
+  allowed    boolean NOT NULL DEFAULT true,
+  updated_by text,
+  updated_at timestamptz DEFAULT now());
+
+-- ── v3.1: simple key/value settings (used by /api/admin/settings-get|set, e.g. leaderboard_mode) ──
+CREATE TABLE IF NOT EXISTS kv_settings (
+  key        text PRIMARY KEY,
+  value      text NOT NULL DEFAULT '',
+  updated_at timestamptz DEFAULT now());
+
+-- ── v3.1: daily OTP counters — 1 tiny row per user per day (CDR retention roll-up) ──
+-- Raw sms_cdr rows live only for the current PKT day; at 05:00 PKT (00:00 UTC) the retention
+-- loop counts yesterday per user into this table, then deletes the raw rows.
+-- Week / Month / All-Time totals everywhere = SUM of these rows + today's live count.
+CREATE TABLE IF NOT EXISTS otp_daily (
+  username text NOT NULL,
+  day      date  NOT NULL,
+  count    int   NOT NULL DEFAULT 0,
+  PRIMARY KEY (username, day));
 
 CREATE OR REPLACE FUNCTION ingest_cdr(rows json) RETURNS int AS $$
   WITH ins AS (
