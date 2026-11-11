@@ -4,12 +4,9 @@ import { useToast } from '../context/ToastContext';
 import { postApi } from '../services/api';
 import { getCountryFlag } from '../utils/countryCodes';
 import { Card, PageHead, IconBtn, Empty, SearchBox, StatStrip } from './Ui';
-import { RefreshCw, Server, Users, Zap, Database, AlertTriangle, Megaphone, KeyRound, UserPlus, Gift, Trash2, Search, Check, X, Ship, Clock, BarChart3, CalendarRange, Crown, TrendingUp, Activity, UserX } from 'lucide-react';
-
+import { RefreshCw, Server, Users, Zap, Database, AlertTriangle, Megaphone, KeyRound, UserPlus, Gift, Trash2, Search, Check, X, Ship, Clock, BarChart3, CalendarRange, Crown, TrendingUp, Activity, UserX, Pin, PinOff } from 'lucide-react';
 interface Props { initialTab?: string; onBack: () => void; }
-
 const pu = (s: string): string => String(s || '').split(/(_|[\s-]+)/).map((seg) => { if (!seg || /[_\s-]+/.test(seg)) return seg; const l = seg.toLowerCase(); if (['sms','otp','api','lm','uk','us','pk','tv','hq'].includes(l)) return l.toUpperCase(); if (l.length <= 4) return l.toUpperCase(); return l.charAt(0).toUpperCase() + l.slice(1); }).join('');
-
 const Mini: React.FC<{ v: React.ReactNode; l: string; tone?: string; live?: boolean }> = ({ v, l, tone, live }) => (
   <div className="px-1 py-2 rounded-lg bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-800 text-center min-w-0 relative">
     {live && <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-emerald-500 dot-live" />}
@@ -17,14 +14,12 @@ const Mini: React.FC<{ v: React.ReactNode; l: string; tone?: string; live?: bool
     <div className="text-[8px] font-bold uppercase tracking-wider text-slate-400 mt-1 truncate">{l}</div>
   </div>
 );
-
 const Spark: React.FC<{ vals: number[]; color: string }> = ({ vals, color }) => {
   const v = vals && vals.length ? vals : [0, 0];
   const W = 300, H = 56, P = 5, max = Math.max(...v, 1);
   const pts = v.map((x, i) => `${P + (i * (W - 2 * P)) / Math.max(1, v.length - 1)},${H - P - (x / max) * (H - 2 * P)}`).join(' ');
   return (<svg viewBox={`0 0 ${W} ${H}`} className="w-full h-12"><polyline points={`${P},${H - P} ${pts} ${W - P},${H - P}`} fill={color} opacity=".1" stroke="none" /><polyline points={pts} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg>);
 };
-
 const Bars: React.FC<{ vals: number[]; labels: string[] }> = ({ vals, labels }) => {
   const max = Math.max(...vals, 1);
   return (
@@ -39,22 +34,22 @@ const Bars: React.FC<{ vals: number[]; labels: string[] }> = ({ vals, labels }) 
     </div>
   );
 };
-
 const TAB_ICON: Record<string, any> = { scc: Server, fleet: Database, team: Users, limits: Gift, bulk: Ship, crush: Trash2, otp: CalendarRange, trep: BarChart3 };
 const TABS = [{ id: 'scc', label: 'SCC' }, { id: 'fleet', label: 'Fleet' }, { id: 'team', label: 'Team' }, { id: 'limits', label: 'Limits' }, { id: 'bulk', label: 'Bulk' }, { id: 'crush', label: 'Crush' }, { id: 'otp', label: 'OTP Rep' }, { id: 'trep', label: 'Team Rep' }];
-
 export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }) => {
   const { role } = useAuth();
   const { showToast } = useToast();
   const [tab, setTab] = useState(initialTab);
   const [confirm, setConfirm] = useState<{ title: string; body: string; danger?: boolean; fn: () => Promise<void> } | null>(null);
-  
   const [scc, setScc] = useState<any>(null); const [sccBusy, setSccBusy] = useState(false); const [alertHidden, setAlertHidden] = useState(false);
   const [fleet, setFleet] = useState<any[]>([]); const [fleetQ, setFleetQ] = useState(''); const [fleetF, setFleetF] = useState('all');
   const [prog, setProg] = useState<any>(null); const [fleetBusy, setFleetBusy] = useState(false);
   const [teams, setTeams] = useState<any[]>([]); const [prefixes, setPrefixes] = useState<any[]>([]); const [report, setReport] = useState<any>(null); const [teamBusy, setTeamBusy] = useState(false);
   const [admins, setAdmins] = useState<any[]>([]);
   const [pf, setPf] = useState({ prefix: '', admin: '', suffix: '', name: '', pinPrefix: '', pinUser: '' });
+  // FIX: Team-prefix input now has its OWN state (was sharing pf.prefix with the Create-ID select)
+  const [tpPrefix, setTpPrefix] = useState('');
+  const [onlineOpen, setOnlineOpen] = useState(false);
   const [pw, setPw] = useState({ u: '', p: '', promo: '' });
   const [limF, setLimF] = useState<any>({ qm: '', rd: '', cd: '' });
   const [limUser, setLimUser] = useState(''); const [limStatus, setLimStatus] = useState<any>(null); const [limBusy, setLimBusy] = useState(false);
@@ -65,85 +60,81 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
   const [crushOpts, setCrushOpts] = useState<any[]>([]); const [crushSugs, setCrushSugs] = useState<any[]>([]);
   const [crushSel, setCrushSel] = useState(''); const [hard, setHard] = useState(false); const [crushBusy, setCrushBusy] = useState(false);
   const [lbMode, setLbModeState] = useState('team');
-
   useEffect(() => { setTab(initialTab); }, [initialTab]);
-
   const loadScc = async () => { setSccBusy(true); const r = await postApi<any>('/api/scc/status'); if (r?.ok) setScc(r); setSccBusy(false); };
   const loadFleet = async () => { setFleetBusy(true); const [f, p] = await Promise.all([postApi<any>('/api/admin/fleet-ranges'), postApi<any>('/api/admin/sync-progress')]); if (f?.ok) setFleet(f.ranges || []); if (p?.ok) setProg(p.prog); setFleetBusy(false); };
-  const loadTeam = async () => { 
-    setTeamBusy(true); 
+  const loadTeam = async () => {
+    setTeamBusy(true);
     const [t, px, rp, a] = await Promise.all([
-      postApi<any>('/api/admin/my-clients'), 
-      postApi<any>('/api/admin/team-prefixes'), 
+      postApi<any>('/api/admin/my-clients'),
+      postApi<any>('/api/admin/team-prefixes'),
       postApi<any>('/api/admin/team-report'),
       postApi<any>('/api/admin/admins')
-    ]); 
-    if (t?.ok) setTeams(t.teams || []); 
-    if (px?.ok) setPrefixes(px.prefixes || []); 
-    if (rp?.ok) setReport(rp); 
+    ]);
+    if (t?.ok) setTeams(t.teams || []);
+    if (px?.ok) setPrefixes(px.prefixes || []);
+    if (rp?.ok) setReport(rp);
     if (a?.ok) setAdmins(a.admins || []);
-    const st = await postApi<any>('/api/admin/settings-get'); 
-    if (st?.ok) setLbModeState(st.settings?.leaderboard_mode || 'team'); 
-    setTeamBusy(false); 
+    const st = await postApi<any>('/api/admin/settings-get');
+    if (st?.ok) setLbModeState(st.settings?.leaderboard_mode || 'team');
+    setTeamBusy(false);
   };
   const loadLimits = async () => { setLimBusy(true); const r = await postApi<any>('/api/admin/limits-get'); if (r?.ok && r.limits) setLimF({ qm: r.limits.qty_max, rd: r.limits.range_daily, cd: r.limits.country_daily }); setLimBusy(false); };
-  const loadBulk = async () => { 
-    setBulkBusy(true); 
+  const loadBulk = async () => {
+    setBulkBusy(true);
     const [r, c, q] = await Promise.all([
-      postApi<any>('/api/admin/bulk-ranges'), 
-      postApi<any>('/api/admin/my-clients'), 
+      postApi<any>('/api/admin/bulk-ranges'),
+      postApi<any>('/api/admin/my-clients'),
       postApi<any>('/api/alloc/queue-status')
-    ]); 
-    if (r?.ok) setBulkR(r.ranges || []); 
-    if (c?.ok) { 
-      const us: string[] = []; 
-      (c.teams || []).forEach((t: any) => (t.clients || []).forEach((x: any) => { if (x.username) us.push(x.username); })); 
-      setBulkU([...new Set(us)]); 
-    } 
-    if (q?.ok) setDockPending(q.totalBatches || 0); 
-    setBulkBusy(false); 
+    ]);
+    if (r?.ok) setBulkR(r.ranges || []);
+    if (c?.ok) {
+      const us: string[] = [];
+      (c.teams || []).forEach((t: any) => (t.clients || []).forEach((x: any) => { if (x.username) us.push(x.username); }));
+      setBulkU([...new Set(us)]);
+    }
+    if (q?.ok) setDockPending(q.totalBatches || 0);
+    setBulkBusy(false);
   };
   const loadCrush = async () => { setCrushBusy(true); const r = await postApi<any>('/api/admin/crush-options'); if (r?.ok) { setCrushOpts(r.options || []); setCrushSugs(r.suggestions || []); if (!crushSel && r.options?.[0]) setCrushSel(r.options[0].range_name); } setCrushBusy(false); };
-
   useEffect(() => {
     const run = () => { if (tab === 'scc' || tab === 'otp' || tab === 'trep') loadScc(); if (tab === 'fleet') loadFleet(); if (tab === 'team' || tab === 'trep') loadTeam(); if (tab === 'limits') loadLimits(); if (tab === 'bulk') loadBulk(); if (tab === 'crush') loadCrush(); };
     run();
     const iv = setInterval(run, tab === 'scc' ? 10000 : tab === 'fleet' ? 8000 : 20000);
     return () => clearInterval(iv);
   }, [tab]);
-
   const fFleet = useMemo(() => fleet.filter((r) => (fleetF === 'gateway' ? r.inGateway : fleetF === 'vanished' ? !r.inGateway : true) && (!fleetQ || (r.name + r.country).toLowerCase().includes(fleetQ.toLowerCase()))), [fleet, fleetF, fleetQ]);
   const fBulkR = useMemo(() => bulkR.filter((r) => !bulkQ || r.name.toLowerCase().includes(bulkQ.toLowerCase())), [bulkR, bulkQ]);
   const fBulkU = useMemo(() => bulkU.filter((u) => !bulkUQ || u.toLowerCase().includes(bulkUQ.toLowerCase())), [bulkU, bulkUQ]);
-  
+  // FIX: pinned members collected from all teams for the dedicated section
+  const pinnedList = useMemo(() => {
+    const out: any[] = [];
+    (teams || []).forEach((t: any) => (t.clients || []).forEach((c: any) => { if (c.pinned) out.push({ username: c.username, prefix: t.prefix || 'SYS' }); }));
+    return out;
+  }, [teams]);
   const batches = selR.length * selU.length;
   const etaMin = batches ? Math.max(1, Math.ceil(batches / 38)) : 0;
-  
   const ask = (title: string, body: string, fn: () => Promise<void>, danger = true) => setConfirm({ title, body, fn, danger });
   const setLbMode = async (m: string) => { setLbModeState(m); const d = await postApi<any>('/api/admin/settings-set', { key: 'leaderboard_mode', value: m }); showToast(d?.ok ? `✓ Leaderboard: ${m}` : 'Save failed', d?.ok ? 'success' : 'error'); };
   const inp = 'w-full px-2.5 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-900 dark:text-white outline-none focus:ring-1 focus:ring-cyan-500/40';
   const btnP = 'px-3 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-[11px] font-bold transition-all cursor-pointer shrink-0 disabled:opacity-40';
   const btnD = 'px-3 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-bold transition-all cursor-pointer shrink-0 disabled:opacity-40';
-
   if (role !== 'super' && role !== 'admin') return (<div className="w-full max-w-full overflow-hidden space-y-2 pb-16"><PageHead title="Admin Hub" onBack={onBack} /><Empty icon={Server} text="Admins only" /></div>);
-
-  const otp = scc?.otp || {}; 
+  const otp = scc?.otp || {};
   const wb = scc?.weekBuckets || [0, 0, 0, 0, 0, 0, 0];
   const dayLbl = wb.map((_: any, i: number) => new Date(Date.now() - (6 - i) * 86400000).toLocaleDateString(undefined, { weekday: 'narrow' }));
   const dayFull = wb.map((_: any, i: number) => new Date(Date.now() - (6 - i) * 86400000).toLocaleDateString(undefined, { weekday: 'short' }));
-  const bestI = wb.indexOf(Math.max(...wb, 0)); 
+  const bestI = wb.indexOf(Math.max(...wb, 0));
   const avgDay = Math.round(wb.reduce((a: number, b: number) => a + b, 0) / 7);
-  
-  const sccTeams = scc?.teams || []; 
+  const sccTeams = scc?.teams || [];
   const queueSize = scc?.queue?.size ?? 0;
   const repTeams = report?.teams || [];
   const topMap: Record<string, any> = {}; sccTeams.forEach((t: any) => { topMap[t.prefix] = t.top; });
-
+  const onlineList = scc?.users?.list || [];
   return (
     <div className="w-full max-w-full overflow-hidden space-y-2 pb-16">
       <PageHead title="Admin Hub" chip={role === 'super' ? 'SUPER' : 'ADMIN'} onBack={onBack}
         right={<IconBtn onClick={() => { if (tab === 'scc' || tab === 'otp' || tab === 'trep') loadScc(); else if (tab === 'fleet') loadFleet(); else if (tab === 'team') loadTeam(); else if (tab === 'limits') loadLimits(); else if (tab === 'bulk') loadBulk(); else loadCrush(); }} title="Refresh"><RefreshCw className="w-3.5 h-3.5" /></IconBtn>} />
-      
       <Card className="p-1.5 grid grid-cols-4 gap-1">
         {TABS.map((t) => {
           const Ic = TAB_ICON[t.id] || Server;
@@ -155,7 +146,6 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
           );
         })}
       </Card>
-
       {tab === 'scc' && scc && (
         <div className="space-y-2">
           {(scc.alerts || []).length > 0 && !alertHidden && (
@@ -203,6 +193,23 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
               </span>
             ))}
           </Card>
+          {/* ── FIX: Online members — names shown, max 5, expand for all ── */}
+          <Card className="p-2.5 space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-emerald-500 dot-live" />Online · {scc.users?.online ?? 0}</span>
+              {onlineList.length > 5 && (
+                <button type="button" className="text-[10px] font-bold text-cyan-600 dark:text-cyan-400 cursor-pointer" onClick={() => setOnlineOpen(!onlineOpen)}>
+                  {onlineOpen ? 'Show less' : `+${onlineList.length - 5} more`}
+                </button>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-1">
+              {(onlineOpen ? onlineList : onlineList.slice(0, 5)).map((x: any, i: number) => (
+                <span key={x.u + i} className="px-2 py-1 rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 text-[10px] font-bold font-mono truncate max-w-[140px]">{pu(x.u)}</span>
+              ))}
+              {!onlineList.length && <span className="text-[10px] text-slate-400 font-semibold">Nobody online right now</span>}
+            </div>
+          </Card>
           {(scc.incidents || []).length === 0 ? <Empty icon={Check} text="System nominal" /> : (
             <Card className="divide-y divide-slate-100 dark:divide-slate-800 overflow-hidden">
               {(scc.incidents || []).map((inc: any) => (
@@ -217,7 +224,6 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
           )}
         </div>
       )}
-
       {tab === 'otp' && scc && (
         <div className="space-y-2">
           <StatStrip items={[
@@ -249,7 +255,6 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
           </Card>
         </div>
       )}
-
       {tab === 'trep' && (
         <div className="space-y-2">
           {report?.hottest && (
@@ -287,7 +292,6 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
           })}
         </div>
       )}
-
       {tab === 'fleet' && (
         <div className="space-y-2">
           <Card className="p-2.5 space-y-1.5">
@@ -328,7 +332,6 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
           ))}
         </div>
       )}
-
       {tab === 'team' && (
         <div className="space-y-2">
           {/* ── Admin List (visible to all admins, demote button super-only) ── */}
@@ -347,26 +350,24 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
               </div>
             ))}
           </Card>
-
-          {/* ── Promote (super only) ── */}
+          {/* ── Promote (super + admin) ── */}
           {(role === 'super' || role === 'admin') && (
             <Card className="p-3 space-y-2">
               <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1"><UserPlus className="w-3 h-3 text-cyan-500" /> Promote to Admin</span>
               <div className="flex gap-1.5">
                 <input value={pw.promo} onChange={(e) => setPw({ ...pw, promo: e.target.value })} placeholder="username to promote" className={inp} />
-                <button type="button" className={btnP} onClick={async () => { 
-                  const d = await postApi<any>('/api/admin/promote', { username: pw.promo }); 
-                  showToast(d?.ok ? `✓ ${pw.promo} is now admin` : d?.error || 'Failed', d?.ok ? 'success' : 'error'); 
-                  if (d?.ok) setPw({ ...pw, promo: '' }); 
+                <button type="button" className={btnP} onClick={async () => {
+                  const d = await postApi<any>('/api/admin/promote', { username: pw.promo });
+                  showToast(d?.ok ? `✓ ${pw.promo} is now admin` : d?.error || 'Failed', d?.ok ? 'success' : 'error');
+                  if (d?.ok) setPw({ ...pw, promo: '' });
                 }}>Promote</button>
               </div>
             </Card>
           )}
-
           {/* ── Create ID (super + admin) ── */}
-{(role === 'super' || role === 'admin') && (
-<Card className="p-3 space-y-2">
-  <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1"><UserPlus className="w-3 h-3 text-cyan-500" /> Create ID</span>
+          {(role === 'super' || role === 'admin') && (
+            <Card className="p-3 space-y-2">
+              <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1"><UserPlus className="w-3 h-3 text-cyan-500" /> Create ID</span>
               <div className="flex gap-1.5">
                 <select value={pf.prefix} onChange={(e) => setPf({ ...pf, prefix: e.target.value })} className={inp + ' w-24'}>
                   <option value="">Prefix…</option>{prefixes.map((p) => <option key={p.prefix} value={p.prefix}>{p.prefix}</option>)}
@@ -376,15 +377,14 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
               </div>
             </Card>
           )}
-
-          {/* ── Team prefix (super + admin) ── */}
-{(role === 'super' || role === 'admin') && (
-<Card className="p-3 space-y-2">
-  <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1"><Server className="w-3 h-3 text-indigo-500" /> Team prefix</span>
+          {/* ── Team prefix (super + admin) — FIX: own state, no longer clashes with Create ID ── */}
+          {(role === 'super' || role === 'admin') && (
+            <Card className="p-3 space-y-2">
+              <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1"><Server className="w-3 h-3 text-indigo-500" /> Team prefix</span>
               <div className="flex gap-1.5">
-                <input value={pf.prefix} onChange={(e) => setPf({ ...pf, prefix: e.target.value })} placeholder="ZML_" className={inp + ' font-mono'} />
+                <input value={tpPrefix} onChange={(e) => setTpPrefix(e.target.value)} placeholder="ZML_" className={inp + ' font-mono'} />
                 <input value={pf.admin} onChange={(e) => setPf({ ...pf, admin: e.target.value })} placeholder="admin" className={inp} />
-                <button type="button" className={btnP} onClick={async () => { const d = await postApi<any>('/api/admin/set-prefix', { prefix: pf.prefix, admin: pf.admin }); showToast(d?.ok ? '✓ Assigned' : d?.error || 'Failed', d?.ok ? 'success' : 'error'); loadTeam(); }}>Assign</button>
+                <button type="button" className={btnP} onClick={async () => { const d = await postApi<any>('/api/admin/set-prefix', { prefix: tpPrefix, admin: pf.admin }); showToast(d?.ok ? '✓ Assigned' : d?.error || 'Failed', d?.ok ? 'success' : 'error'); if (d?.ok) setTpPrefix(''); loadTeam(); }}>Assign</button>
               </div>
               {prefixes.map((p) => (
                 <div key={p.prefix} className="flex items-center gap-2 py-1">
@@ -395,37 +395,54 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
               ))}
             </Card>
           )}
-
-   {/* ── Reset password (super + admin) ── */}
-{(role === 'super' || role === 'admin') && (
-<Card className="p-3 space-y-2">
-  <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1"><KeyRound className="w-3 h-3 text-amber-500" /> Reset password</span>
+          {/* ── Reset password (super + admin) ── */}
+          {(role === 'super' || role === 'admin') && (
+            <Card className="p-3 space-y-2">
+              <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1"><KeyRound className="w-3 h-3 text-amber-500" /> Reset password</span>
               <div className="flex gap-1.5">
                 <input value={pw.u} onChange={(e) => setPw({ ...pw, u: e.target.value })} placeholder="username" className={inp} />
                 <button type="button" className={btnP} onClick={async () => { const d = await postApi<any>('/api/admin/reset-credentials', { username: pw.u }); showToast(d?.ok ? '✓ Wiped — user sets new password' : d?.error || 'Failed', d?.ok ? 'success' : 'error'); if (d?.ok) setPw({ ...pw, u: '' }); }}>Reset</button>
               </div>
             </Card>
           )}
-
-         {/* ── Pin User (super + admin) ── */}
-{(role === 'super' || role === 'admin') && (
-<Card className="p-3 space-y-2">
-  <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1"><Users className="w-3 h-3 text-emerald-500" /> Pin User to Team</span>
+          {/* ── Pin User (super + admin) — backend now verifies DB/LaMix first ── */}
+          {(role === 'super' || role === 'admin') && (
+            <Card className="p-3 space-y-2">
+              <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1"><Users className="w-3 h-3 text-emerald-500" /> Pin User to Team</span>
               <div className="flex gap-1.5">
                 <select value={pf.pinPrefix} onChange={(e) => setPf({ ...pf, pinPrefix: e.target.value })} className={inp + ' w-28'}>
                   <option value="">Team…</option>
                   {prefixes.map((p) => <option key={p.prefix} value={p.prefix}>{p.prefix}</option>)}
                 </select>
                 <input value={pf.pinUser} onChange={(e) => setPf({ ...pf, pinUser: e.target.value })} placeholder="Exact username" className={inp} />
-                <button type="button" className={btnP} onClick={async () => { 
-                  const d = await postApi<any>('/api/admin/pin-client', { username: pf.pinUser, prefix: pf.pinPrefix }); 
-                  showToast(d?.ok ? '✓ Pinned' : d?.error || 'Failed', d?.ok ? 'success' : 'error'); 
-                  if (d?.ok) { setPf({ ...pf, pinUser: '' }); loadTeam(); } 
+                <button type="button" className={btnP} onClick={async () => {
+                  const d = await postApi<any>('/api/admin/pin-client', { username: pf.pinUser, prefix: pf.pinPrefix });
+                  showToast(d?.ok ? '✓ Pinned' : d?.error || 'Failed', d?.ok ? 'success' : 'error');
+                  if (d?.ok) { setPf({ ...pf, pinUser: '' }); loadTeam(); }
                 }}>Pin</button>
+              </div>
+              <p className="text-[9px] text-slate-400 font-semibold">User must exist in DB or LaMix — fake names are rejected.</p>
+            </Card>
+          )}
+          {/* ── FIX: Pinned Members section with unpin ── */}
+          {pinnedList.length > 0 && (
+            <Card className="p-3 space-y-2">
+              <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1"><Pin className="w-3 h-3 text-rose-500" /> Pinned Members ({pinnedList.length})</span>
+              <div className="space-y-1">
+                {pinnedList.map((p: any) => (
+                  <div key={p.username} className="flex items-center gap-2 py-1.5 px-2 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-800">
+                    <span className="w-6 h-6 rounded-lg bg-rose-500/10 text-rose-500 flex items-center justify-center shrink-0"><Pin className="w-3 h-3" /></span>
+                    <span className="flex-1 text-[11px] font-bold font-mono truncate text-slate-900 dark:text-white">{pu(p.username)}</span>
+                    <span className="font-mono text-[9px] font-black px-1.5 py-0.5 rounded-md bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border border-cyan-500/20 shrink-0">{p.prefix}</span>
+                    <button type="button" className="p-1.5 rounded-lg text-slate-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/40 cursor-pointer shrink-0" title="Unpin"
+                      onClick={() => ask('Unpin ' + p.username + '?', 'They will fall back to normal prefix matching.', async () => { const d = await postApi<any>('/api/admin/unpin-client', { username: p.username }); showToast(d?.ok ? '✓ Unpinned' : d?.error || 'Failed', d?.ok ? 'success' : 'error'); if (d?.ok) loadTeam(); }, false)}>
+                      <PinOff className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
               </div>
             </Card>
           )}
-
           {/* ── Leaderboard control (super only) ── */}
           {role === 'super' && (
             <Card className="p-3 space-y-2">
@@ -436,7 +453,6 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
               </div>
             </Card>
           )}
-
           {/* ── Teams List (visible to ALL admins) ── */}
           <div className="flex items-center justify-between px-1">
             <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Teams · {teams.reduce((s, t) => s + (t.count || 0), 0)} clients</span>
@@ -459,7 +475,6 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
           ))}
         </div>
       )}
-
       {tab === 'limits' && (
         <div className="space-y-2">
           <Card className="p-3 space-y-2">
@@ -488,7 +503,6 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
           </Card>
         </div>
       )}
-
       {tab === 'bulk' && (
         <div className="space-y-2">
           <Card className="p-2.5 flex items-center gap-2">
@@ -548,7 +562,6 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
           </Card>
         </div>
       )}
-
       {tab === 'crush' && (
         <div className="space-y-2">
           <Card className="p-2.5 border-cyan-500/20 text-[10px] leading-relaxed text-slate-500 dark:text-slate-400">
@@ -575,7 +588,7 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
             </select>
             {(() => { const o = crushOpts.find((x) => x.range_name === crushSel); if (!o) return null; return (
               <div className="flex items-center gap-1.5 flex-wrap">
-                <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold uppercase font-mono border ${o.pool_assigned > 0 ? 'bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-cyan-500/20' : o.gone ? 'bg-rose-500/10 text-rose-500 border-rose-500/20' : 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20'}`}>
+                <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold uppercase font-mono border ${o.pool_assigned > 0 ? 'bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-cyan-500/20' : o.gone ? 'bg-rose-500/10 text-rose-500 border border-rose-500/20' : 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20'}`}>
                   {o.pool_assigned > 0 ? 'live in pool' : o.gone ? 'vanished' : 'returned'}
                 </span>
                 <span className="text-[10px] text-slate-400 font-mono">purgeable {o.count} · active {o.active}</span>
@@ -591,7 +604,6 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
           </Card>
         </div>
       )}
-
       {confirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/75 backdrop-blur-md">
           <Card className="w-full max-w-sm p-5 shadow-2xl">
