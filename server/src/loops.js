@@ -1,8 +1,10 @@
 // Background daemons (single process, PM2-managed). LaMix = source of truth.
-const { q, PKT_DAY } = require('./db');
+// FIX (v3.1): pool imported for the atomic CDR roll-up in dailyTruncationLoop.
+const { q, PKT_DAY, pool } = require('./db');
 const lx = require('./lamix');
 const sse = require('./sse');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
 const normT = s => {
   let v = String(s == null ? '' : s).trim();
   if (!v) return v;
@@ -13,6 +15,7 @@ const normT = s => {
   // Normal ISO / pg timestamp cleanup
   return v.replace('T', ' ').replace(/\.\d+/, '').replace(/(Z|[+-]\d{2}:?\d{2})$/, '').trim();
 };
+
 const G = global;
 G.__cdrHb = 0; G.__cdrLast = 0; G.__syncHb = 0; G.__reconHb = 0; G.__queueHb = 0; G.__clientsHb = 0;
 G.__reconState = { status: 'idle', fetched: 0, expected: 0, remaining: 0, etaSecs: 0 };
@@ -35,6 +38,7 @@ async function smsPayloadFor(username, clientName){
   const r = await q("SELECT to_char(time AT TIME ZONE 'UTC','HH24:MI:SS') AS time, time AS datetime, number, cli, content AS message, range FROM sms_cdr WHERE time >= " + PKT_DAY + " AND (LOWER(client)=LOWER($1) OR LOWER(client)=LOWER($2)) ORDER BY time DESC LIMIT 50", [username, alt]);
   return { ok: true, count: c.rows[0].t, recent: r.rows };
 }
+
 async function pushSmsTo(users){
   for (const u of new Set(users)) {
     try { const p = await smsPayloadFor(u, u); sse.pushUsers([u], 'sms', p); sse.pushUsers([u], 'lb', {}); } catch (e) {}
@@ -176,6 +180,8 @@ async function reconcileLoop(){
 }
 
 // ── BOAT 4: allocation queue worker (row-locked, race-free) ──
+// NOTE: alloc_events is written at REQUEST time in alloc.js (both instant and queued
+// paths), so this worker must NOT write them again — that would double-count limits.
 async function queueWorker(){
   while (true) {
     G.__queueHb = Date.now();
@@ -218,12 +224,14 @@ async function clientsLoop(){
         const r = await lx.post('/clients', { username: it.username, name: it.name || it.username,
           canUseApi: !!it.can_use_api, canViewRanges: !!it.can_view_ranges, canUseExtendedApi: !!it.can_use_extended_api });
         const okR = r && !r._error && !r._rateLimited;
+        // Password stays stored in client_queue.generated_password (DB only).
+        // FIX: it is NO LONGER written into the notification (notifications are readable forever).
         await q("UPDATE client_queue SET status=$2, generated_password=$3, result=$4, processed_at=NOW() WHERE id=$1",
           [it.id, okR ? 'done' : 'failed', (r && r.password) || null, JSON.stringify(r || {})]);
         await q("INSERT INTO app_notifs (target,type,title,body,created_by) VALUES ($1,$2,$3,$4,'system')",
           [String(it.admin_username || '*').toLowerCase(), okR ? 'success' : 'warn',
-           okR ? 'Client Created' : 'Client Creation Failed',
-           okR ? ('✅ ' + it.username + ' created' + (r.password ? ' | Pass: ' + r.password : '')) : ('❌ ' + it.username + ' failed: ' + ((r && r._error) || 'unknown'))]);
+          okR ? 'Client Created' : 'Client Creation Failed',
+          okR ? ('✅ ' + it.username + ' created') : ('❌ ' + it.username + ' failed: ' + ((r && r._error) || 'unknown'))]);
       }
     } catch (e) {}
     await sleep(2000);
@@ -238,12 +246,14 @@ function maybeRangeRefresh(rid){
   if (Date.now() - last < 60000) return;
   _rrTh.set(rid, Date.now()); G.__reconDue = Date.now();
 }
+
 async function rangeRotLoop(){
   while (true) {
     try { const r = await q("SELECT 1 FROM ranges WHERE total_numbers>0 AND (last_num_sync IS NULL OR last_num_sync < NOW() - interval '6 minutes') LIMIT 1"); if (r.rows[0]) G.__reconDue = Date.now(); } catch (e) {}
     await sleep(20000);
   }
 }
+
 async function refreshRange(rangeId){
   const t0 = new Date().toISOString();
   let after = null, pages = 0, seen = 0;
@@ -264,20 +274,36 @@ async function refreshRange(rangeId){
   invalidateNc(); sse.broadcast('numbers'); sse.broadcast('ranges');
   return { pages, seen };
 }
+
 function start(){ cdrLoop(); syncLoop(); reconcileLoop(); queueWorker(); clientsLoop(); rangeRotLoop(); console.log('[loops] daemons LIVE (cdr+sync+reconcile+queue+clients+rot)'); }
 module.exports = { start, ncMap, invalidateNc, maybeRangeRefresh, pushSmsTo, smsPayloadFor, refreshRange, dailyTruncationLoop };
 
-// ── BOAT 6: CDR retention ──
-// FIX: the old version wiped ALL CDR rows older than today at 5:00 AM PKT, so Week / Month
-// (and the Admin Hub OTP report) could never count more than one day. Now we keep 35 days of
-// raw CDR so Day / Week (7d) / Month (30d) and the 7-day chart are all computed live and match.
+// ── BOAT 6: CDR rollover (count per user → otp_daily, then wipe raw rows) ──
+// FIX (v3.1): Raw SMS text lives ONLY for the current PKT day. At 05:00 PKT (00:00 UTC) we
+// first COUNT every user's OTPs into otp_daily (one tiny row per user per day), then DELETE
+// the raw rows. Week / Month / All-Time totals everywhere are sums of those tiny rows +
+// today's live count (see user.js, scc.js, admin.js).
+// Count + delete run inside ONE transaction → a row can never be deleted without being
+// counted, and never counted twice. Late rows are simply added on the next pass.
+// First run after deploy automatically backfills otp_daily from the existing CDR history.
 async function dailyTruncationLoop(){
   while (true) {
     try {
-      const del = await q("DELETE FROM sms_cdr WHERE time < NOW() - interval '35 days'");
-      if (del.rowCount) console.log('[retention] purged', del.rowCount, 'CDR rows older than 35 days');
+      const br = await q("SELECT date_trunc('day', NOW() AT TIME ZONE 'UTC') AS b");
+      const B = br.rows[0].b;
+      const has = await q("SELECT 1 FROM sms_cdr WHERE time < $1 LIMIT 1", [B]);
+      if (has.rows[0]) {
+        const cl = await pool.connect();
+        try {
+          await cl.query('BEGIN');
+          await cl.query("INSERT INTO otp_daily (username, day, count) SELECT LOWER(client), date_trunc('day', time)::date, COUNT(*)::int FROM sms_cdr WHERE time < $1 AND client IS NOT NULL AND client <> '' GROUP BY 1, 2 ON CONFLICT (username, day) DO UPDATE SET count = otp_daily.count + EXCLUDED.count", [B]);
+          const del = await cl.query("DELETE FROM sms_cdr WHERE time < $1", [B]);
+          await cl.query('COMMIT');
+          console.log('[retention] rolled up + purged', del.rowCount, 'raw CDR rows');
+        } finally { cl.release(); }
+      }
     } catch (e) { console.error('[retention]', e.message); }
-    await sleep(3600000); // hourly check
+    await sleep(3600000); // hourly check; purge lands right after 05:00 PKT
   }
 }
 // === EOF: loops.js ===
