@@ -384,7 +384,12 @@ R.post('/api/admin/team-report', A.verify, async (req, res) => {
   if (!await needAdmin(req, res)) return;
   const all = await prefixes(), pm = await pins();
   const today = await q("SELECT client, COUNT(*)::int c FROM sms_cdr WHERE time >= " + PKT_DAY + " AND client IS NOT NULL GROUP BY 1");
-  const week = await q("SELECT client, COUNT(*)::int c FROM sms_cdr WHERE time >= " + PKT_DAY + " - interval '6 days' AND client IS NOT NULL GROUP BY 1");
+  // FIX (CDR retention): week = stored daily counters (otp_daily) merged with today's live rows
+  const wk = await q("SELECT username AS client, SUM(count)::int c FROM otp_daily WHERE day >= DATE(" + PKT_DAY + ") - 6 AND day < DATE(" + PKT_DAY + ") GROUP BY 1");
+  const wMap = {};
+  wk.rows.forEach(r => { wMap[r.client] = r.c; });
+  today.rows.forEach(r => { wMap[r.client] = (wMap[r.client] || 0) + r.c; });
+  const weekRows = Object.entries(wMap).map(([client, c]) => ({ client, c }));
   const data = await lx.get('/clients', { limit: 500 });
   const clients = (data.records || data.clients || []).map(c => c.username);
   const tally = rows => {
@@ -395,7 +400,7 @@ R.post('/api/admin/team-report', A.verify, async (req, res) => {
     });
     return m;
   };
-  const tT = tally(today.rows), tW = tally(week.rows);
+  const tT = tally(today.rows), tW = tally(weekRows);
   const cC = {};
   clients.forEach(c => {
     const k = resolveTeam(String(c).toLowerCase(), all, pm) || '__none__';
@@ -443,6 +448,17 @@ R.post('/api/admin/cli-access-list', A.verify, async (req, res) => {
   ok(res, { rows: r.rows });
 });
 
+// NEW (v3.1): DOR visibility switch per user — mirrors cli-access.
+// Backend stays in full control of who sees DOR (dor_allowed column in user_creds).
+R.post('/api/admin/dor-access', A.verify, async (req, res) => {
+  if (!await needAdmin(req, res)) return;
+  const un = String(req.body.username || '').trim().toLowerCase();
+  if (!un) return res.status(400).json({ ok: false, error: 'username required' });
+  const allowed = req.body.allowed !== false;
+  await q("UPDATE user_creds SET dor_allowed=$2, updated_at=NOW() WHERE username=$1", [un, allowed]);
+  ok(res, { username: un, allowed });
+});
+
 R.post('/api/admin/settings-get', A.verify, async (req, res) => {
   if (!await needAdmin(req, res)) return;
   const r = await q("SELECT key, value FROM kv_settings");
@@ -468,3 +484,4 @@ R.post('/api/admin/lift-restrictions', A.verify, async (req, res) => {
 });
 
 module.exports = R;
+// === EOF: admin.js ===
