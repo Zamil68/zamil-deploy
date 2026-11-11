@@ -13,7 +13,6 @@ async function prefixes(){ const r = await q("SELECT prefix, admin_username, lab
 async function pins(){ const r = await q("SELECT username, prefix FROM client_team_pins"); const m = {}; r.rows.forEach(x => m[x.username] = x.prefix); return m; }
 function prefixTeam(un, all){ const s = all.slice().sort((a, b) => b.prefix.length - a.prefix.length); for (const p of s) if (p.prefix && un.indexOf(p.prefix.toLowerCase()) === 0) return p.prefix; return ''; }
 function resolveTeam(un, all, pm){ const pin = pm[un]; if (pin && all.some(p => p.prefix === pin)) return pin; return prefixTeam(un, all); }
-// FIX: Return ALL prefixes for both super AND admin
 function myPrefixes(role, un, all){ return all; }
 
 R.post('/api/admin/admins', A.verify, async (req, res) => {
@@ -25,18 +24,11 @@ R.post('/api/admin/admins', A.verify, async (req, res) => {
 R.post('/api/admin/promote', A.verify, async (req, res) => {
   if (!await needAdmin(req, res)) return;
   const role = await A.getRole(req.user.username);
-  if (role !== 'super' && role !== 'admin') {
-    return res.status(403).json({ ok: false, error: 'Only super/admin can manage roles' });
-  }
+  if (role !== 'super' && role !== 'admin') return res.status(403).json({ ok: false, error: 'Only super/admin can manage roles' });
   const t = String(req.body.username || '').trim().toLowerCase();
   if (!t) return res.status(400).json({ ok: false, error: 'Username required' });
-  if (t === C.SUPER_ADMIN) {
-    return res.status(400).json({ ok: false, error: 'Cannot modify super admin' });
-  }
-  await q(
-    "INSERT INTO user_roles (username,role,added_by) VALUES ($1,'admin',$2) ON CONFLICT (username) DO UPDATE SET role='admin'",
-    [t, req.user.username]
-  );
+  if (t === C.SUPER_ADMIN) return res.status(400).json({ ok: false, error: 'Cannot modify super admin' });
+  await q("INSERT INTO user_roles (username,role,added_by) VALUES ($1,'admin',$2) ON CONFLICT (username) DO UPDATE SET role='admin'", [t, req.user.username]);
   A.roleCache.delete(t);
   ok(res, { message: t + ' is now an admin' });
 });
@@ -44,14 +36,10 @@ R.post('/api/admin/promote', A.verify, async (req, res) => {
 R.post('/api/admin/demote', A.verify, async (req, res) => {
   if (!await needAdmin(req, res)) return;
   const role = await A.getRole(req.user.username);
-  if (role !== 'super' && role !== 'admin') {
-    return res.status(403).json({ ok: false, error: 'Only super/admin can manage roles' });
-  }
+  if (role !== 'super' && role !== 'admin') return res.status(403).json({ ok: false, error: 'Only super/admin can manage roles' });
   const t = String(req.body.username || '').trim().toLowerCase();
   if (!t) return res.status(400).json({ ok: false, error: 'Username required' });
-  if (t === C.SUPER_ADMIN) {
-    return res.status(400).json({ ok: false, error: 'Cannot modify super admin' });
-  }
+  if (t === C.SUPER_ADMIN) return res.status(400).json({ ok: false, error: 'Cannot modify super admin' });
   await q("DELETE FROM user_roles WHERE username=$1", [t]);
   A.roleCache.delete(t);
   ok(res, { message: t + ' removed' });
@@ -80,7 +68,6 @@ R.post('/api/admin/del-prefix', A.verify, async (req, res) => {
 
 R.post('/api/admin/my-clients', A.verify, async (req, res) => {
   if (!await needAdmin(req, res)) return;
-  const role = await A.getRole(req.user.username);
   const data = await lx.get('/clients', { limit: 500 });
   let allClients = ((data.records || data.clients || []).map(c => ({ id: c.username, username: c.username, name: c.name || '' })));
   try {
@@ -89,7 +76,6 @@ R.post('/api/admin/my-clients', A.verify, async (req, res) => {
     dbf.rows.forEach(r => { if (!have.has(String(r.username).toLowerCase())) allClients.push({ id: r.username, username: r.username, name: r.username }); });
   } catch (e) {}
   const all = await prefixes(), pm = await pins();
-  // FIX: Return ALL clients for both super AND admin
   const scoped = allClients;
   const groups = {};
   all.forEach(p => groups[p.prefix] = { prefix: p.prefix, admin: p.admin_username, label: p.label || '', clients: [] });
@@ -107,11 +93,9 @@ R.post('/api/admin/my-clients', A.verify, async (req, res) => {
 
 R.post('/api/admin/create-client', A.verify, async (req, res) => {
   if (!await needAdmin(req, res)) return;
-  const role = await A.getRole(req.user.username);
   let prefix = String(req.body.prefix || '').trim();
   const suffix = String(req.body.suffix || '').trim();
   const all = await prefixes();
-  // FIX: Allow admins to create in any prefix
   if (!prefix) {
     if (all.length === 1) prefix = all[0].prefix;
     else return res.status(400).json({ ok: false, error: 'Select a team prefix first.' });
@@ -122,11 +106,25 @@ R.post('/api/admin/create-client', A.verify, async (req, res) => {
   ok(res, { queued: true, username, message: '⛵ Client creation queued for ' + username });
 });
 
+// FIX: pin now VERIFIES the user exists (DB → ledger → LaMix, same order as login),
+// requires an existing prefix, stores lowercase only (no upper/lower duplicates),
+// and re-pinning the same user just moves the pin (no duplicate rows — username is the key).
 R.post('/api/admin/pin-client', A.verify, async (req, res) => {
   if (!await needAdmin(req, res)) return;
   const username = String(req.body.username || '').trim().toLowerCase(), prefix = String(req.body.prefix || '').trim();
   if (!username || !prefix) return res.status(400).json({ ok: false, error: 'username and prefix required' });
-  await q("INSERT INTO client_team_pins (username,prefix,pinned_by) VALUES ($1,$2,$3) ON CONFLICT (username) DO UPDATE SET prefix=$2", [username, prefix, req.user.username]);
+  const all = await prefixes();
+  if (!all.some(p => p.prefix === prefix)) return res.status(400).json({ ok: false, error: 'Unknown prefix — create it first.' });
+  const db = await q("SELECT username FROM user_creds WHERE username=$1", [username]);
+  let found = !!db.rows[0];
+  if (!found) { const led = await q("SELECT DISTINCT client FROM user_numbers WHERE LOWER(client)=$1 LIMIT 1", [username]); found = !!led.rows[0]; }
+  if (!found) {
+    const data = await lx.get('/clients', { limit: 500 });
+    const cls = (data.records || data.clients || []);
+    found = cls.some(c => String(c.username || '').toLowerCase() === username || String(c.name || '').toLowerCase() === username);
+  }
+  if (!found) return res.status(404).json({ ok: false, error: 'User not found in DB or LaMix — cannot pin.' });
+  await q("INSERT INTO client_team_pins (username,prefix,pinned_by) VALUES ($1,$2,$3) ON CONFLICT (username) DO UPDATE SET prefix=$2, pinned_by=$3", [username, prefix, req.user.username]);
   ok(res, { message: username + ' pinned to ' + prefix });
 });
 
@@ -314,15 +312,9 @@ R.post('/api/admin/fleet-ranges', A.verify, async (req, res) => {
   ok(res, {
     totalCount: r.rows.length,
     ranges: r.rows.map(x => ({
-      id: x.id,
-      name: x.name,
-      country: countryOf(x.name),
-      prefix: x.prefix,
-      totalDbRows: x.total,
-      allocatedToUsers: x.assigned,
-      freeInPool: x.free,
-      inGateway: x.in_gateway,
-      activeUsersCount: x.users,
+      id: x.id, name: x.name, country: countryOf(x.name), prefix: x.prefix,
+      totalDbRows: x.total, allocatedToUsers: x.assigned, freeInPool: x.free,
+      inGateway: x.in_gateway, activeUsersCount: x.users,
       lastOtpAt: om[x.name] ? new Date(om[x.name]).toISOString() : null
     }))
   });
@@ -340,17 +332,9 @@ R.post('/api/admin/reconcile-status', A.verify, async (req, res) => {
   ]);
   const st = global.__reconState || {};
   ok(res, {
-    mirror_total: p2.rows[0].t,
-    mirror_assigned: p2.rows[0].a,
-    db_total: u.rows[0].t,
-    db_assigned: u.rows[0].a,
-    orphans: o.rows[0].c,
-    missing: m.rows[0].c,
-    junk: j.rows[0].c,
-    last_sync: ls.rows[0].t,
-    sync_status: st.status || 'idle',
-    fetched: st.fetched || 0,
-    expected: st.expected || 0
+    mirror_total: p2.rows[0].t, mirror_assigned: p2.rows[0].a, db_total: u.rows[0].t, db_assigned: u.rows[0].a,
+    orphans: o.rows[0].c, missing: m.rows[0].c, junk: j.rows[0].c, last_sync: ls.rows[0].t,
+    sync_status: st.status || 'idle', fetched: st.fetched || 0, expected: st.expected || 0
   });
 });
 
@@ -384,7 +368,6 @@ R.post('/api/admin/team-report', A.verify, async (req, res) => {
   if (!await needAdmin(req, res)) return;
   const all = await prefixes(), pm = await pins();
   const today = await q("SELECT client, COUNT(*)::int c FROM sms_cdr WHERE time >= " + PKT_DAY + " AND client IS NOT NULL GROUP BY 1");
-  // FIX (CDR retention): week = stored daily counters (otp_daily) merged with today's live rows
   const wk = await q("SELECT username AS client, SUM(count)::int c FROM otp_daily WHERE day >= DATE(" + PKT_DAY + ") - 6 AND day < DATE(" + PKT_DAY + ") GROUP BY 1");
   const wMap = {};
   wk.rows.forEach(r => { wMap[r.client] = r.c; });
@@ -394,27 +377,13 @@ R.post('/api/admin/team-report', A.verify, async (req, res) => {
   const clients = (data.records || data.clients || []).map(c => c.username);
   const tally = rows => {
     const m = {};
-    rows.forEach(r => {
-      const k = resolveTeam(String(r.client).toLowerCase(), all, pm) || '__none__';
-      m[k] = (m[k] || 0) + r.c;
-    });
+    rows.forEach(r => { const k = resolveTeam(String(r.client).toLowerCase(), all, pm) || '__none__'; m[k] = (m[k] || 0) + r.c; });
     return m;
   };
   const tT = tally(today.rows), tW = tally(weekRows);
   const cC = {};
-  clients.forEach(c => {
-    const k = resolveTeam(String(c).toLowerCase(), all, pm) || '__none__';
-    cC[k] = (cC[k] || 0) + 1;
-  });
-  // FIX: Show ALL teams for both super AND admin
-  let teams = all.map(p => ({
-    prefix: p.prefix,
-    admin: p.admin_username,
-    label: p.label || '',
-    otpToday: tT[p.prefix] || 0,
-    otpWeek: tW[p.prefix] || 0,
-    clients: cC[p.prefix] || 0
-  }));
+  clients.forEach(c => { const k = resolveTeam(String(c).toLowerCase(), all, pm) || '__none__'; cC[k] = (cC[k] || 0) + 1; });
+  let teams = all.map(p => ({ prefix: p.prefix, admin: p.admin_username, label: p.label || '', otpToday: tT[p.prefix] || 0, otpWeek: tW[p.prefix] || 0, clients: cC[p.prefix] || 0 }));
   teams.push({ prefix: '', admin: '—', label: 'System Generated', otpToday: tT.__none__ || 0, otpWeek: tW.__none__ || 0, clients: cC.__none__ || 0 });
   teams.sort((a, b) => b.otpToday - a.otpToday);
   ok(res, { teams, hottest: teams[0] && teams[0].otpToday > 0 ? teams[0] : null, date: new Date().toISOString().slice(0, 10) });
@@ -448,8 +417,6 @@ R.post('/api/admin/cli-access-list', A.verify, async (req, res) => {
   ok(res, { rows: r.rows });
 });
 
-// NEW (v3.1): DOR visibility switch per user — mirrors cli-access.
-// Backend stays in full control of who sees DOR (dor_allowed column in user_creds).
 R.post('/api/admin/dor-access', A.verify, async (req, res) => {
   if (!await needAdmin(req, res)) return;
   const un = String(req.body.username || '').trim().toLowerCase();
