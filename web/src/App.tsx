@@ -45,9 +45,15 @@ function DashboardContent() {
     number: string; cli: string; message: string; time: string; burst?: number;
   } | null>(null);
   const [zoom, setZoom] = useState<number>(1);
+  // FIX: tick that re-renders NumbersView when a per-number OTP counter increments (live)
+  const [numOtpTick, setNumOtpTick] = useState(0);
+  // FIX: one-time navigation restore flag (refresh memory)
+  const [navRestored, setNavRestored] = useState(false);
   const prevSmsCountRef = useRef<number>(0);
   const seenSmsKeysRef = useRef<Set<string>>(new Set());
   const lastRangeFetchRef = useRef<number>(0);
+  const rangeRetryRef = useRef<number>(0);
+  const navKey = 'zamil_nav_' + (username || '');
   // ── Per-user zoom preference (remembered on this device, each user picks their own) ──
   useEffect(() => {
     try {
@@ -66,6 +72,27 @@ function DashboardContent() {
       if (res && res.ok && res.ranges) setRanges(res.ranges);
     } catch {}
   }, []);
+  // ── FIX: ranges refresh that NEVER drops an update ──
+  // Old code: if a fetch happened <8s ago, the SSE "ranges changed" event was ignored forever
+  // → new range missing from the dashboard. Now: too soon? schedule a retry exactly when the
+  // throttle window ends, so every change eventually lands. force=true jumps the queue
+  // (used after the user's own allocation / unassign).
+  const requestRangesFetch = useCallback((force = false) => {
+    const now = Date.now();
+    const wait = force ? 0 : Math.max(0, 8000 - (now - lastRangeFetchRef.current));
+    if (wait === 0) {
+      lastRangeFetchRef.current = Date.now();
+      fetchRanges(force);
+      return;
+    }
+    if (!rangeRetryRef.current) {
+      rangeRetryRef.current = window.setTimeout(() => {
+        rangeRetryRef.current = 0;
+        lastRangeFetchRef.current = Date.now();
+        fetchRanges(false);
+      }, wait);
+    }
+  }, [fetchRanges]);
   const fetchNumbers = useCallback(async (range: RangeItem) => {
     try {
       const res = await postApi<any>('/api/numbers', { rangeId: range.id, rangeTitle: range.title, limit: 500 });
@@ -85,6 +112,16 @@ function DashboardContent() {
       if (prevSmsCountRef.current > 0) {
         setLatestOtpAlert({ number: fresh[0].number, cli: fresh[0].cli, message: fresh[0].message, time: fresh[0].time, burst: fresh.length });
       }
+      // FIX: live per-number OTP counters (max 30) — only numbers already copied (started)
+      try {
+        const sMap = JSON.parse(localStorage.getItem('zamil_numotp_start') || '{}');
+        const cMap = JSON.parse(localStorage.getItem('zamil_numotp_count') || '{}');
+        let ch = false;
+        fresh.forEach((m) => {
+          if (sMap[m.number] != null && (cMap[m.number] || 0) < 30) { cMap[m.number] = (cMap[m.number] || 0) + 1; ch = true; }
+        });
+        if (ch) { localStorage.setItem('zamil_numotp_count', JSON.stringify(cMap)); setNumOtpTick((t) => t + 1); }
+      } catch {}
     }
     prevSmsCountRef.current = count;
   }, []);
@@ -137,6 +174,30 @@ function DashboardContent() {
     postApi<any>('/api/smscount-range', { range: 'week' }).then((r) => r?.ok && setWeekSmsCount(r.count || 0));
     postApi<any>('/api/smscount-range', { range: 'month' }).then((r) => r?.ok && setMonthSmsCount(r.count || 0));
   }, [isLoggedIn, fetchRanges, fetchSmsStream, checkDorAccess, fetchNotifications]);
+  // ── FIX: RESTORE last position once per login (tab, sub-page, admin tab, lb range, open range) ──
+  useEffect(() => {
+    if (!isLoggedIn || navRestored) return;
+    try {
+      const s = JSON.parse(localStorage.getItem(navKey) || 'null');
+      if (s) {
+        if (s.sub) setSubPage(s.sub);
+        if (s.adminTab) setAdminInitialTab(s.adminTab);
+        if (s.lbRange === 'today' || s.lbRange === 'week' || s.lbRange === 'month') setLeaderboardRange(s.lbRange);
+        if (s.range && s.range.id) { setSelectedRange(s.range); fetchNumbers(s.range); }
+        if (s.tab) setActiveTab(s.tab === 'numbers' ? (s.range && s.range.id ? 'numbers' : 'ranges') : s.tab);
+        if (s.tab === 'top10') fetchLeaderboard(s.lbRange || 'today');
+        if (s.tab === 'dor') fetchDOR();
+      }
+    } catch {}
+    setNavRestored(true);
+  }, [isLoggedIn, navRestored, navKey, fetchNumbers, fetchLeaderboard, fetchDOR]);
+  // ── FIX: SAVE position on every change (survives full browser refresh) ──
+  useEffect(() => {
+    if (!isLoggedIn || !navRestored) return;
+    try {
+      localStorage.setItem(navKey, JSON.stringify({ tab: activeTab, sub: subPage, adminTab: adminInitialTab, lbRange: leaderboardRange, range: selectedRange }));
+    } catch {}
+  }, [activeTab, subPage, adminInitialTab, leaderboardRange, selectedRange, isLoggedIn, navRestored, navKey]);
   // ── SSE bridge: live SMS feed replaces the old 5s polling ──
   useEffect(() => {
     if (!isLoggedIn) return;
@@ -144,14 +205,17 @@ function DashboardContent() {
     if (!rec.length && (live.sms?.count || 0) === 0) return;
     ingestSms(live.sms.count || 0, rec);
   }, [live.sms, isLoggedIn, ingestSms]);
-  // ── Auto-refresh when DB changes (new range / numbers / leaderboard) ──
+  // ── Auto-refresh when DB changes — FIX: never drops the update (retry scheduled) ──
   useEffect(() => {
     if (!isLoggedIn || !live.rangesV) return;
-    const now = Date.now();
-    if (now - lastRangeFetchRef.current < 8000) return; // throttle bursts
-    lastRangeFetchRef.current = now;
-    fetchRanges(false);
-  }, [live.rangesV, isLoggedIn, fetchRanges]);
+    requestRangesFetch(false);
+  }, [live.rangesV, isLoggedIn, requestRangesFetch]);
+  // ── FIX: Ship screen (or any component) can demand an immediate ranges refresh ──
+  useEffect(() => {
+    const h = () => requestRangesFetch(true);
+    window.addEventListener('zamil:ranges-dirty', h);
+    return () => window.removeEventListener('zamil:ranges-dirty', h);
+  }, [requestRangesFetch]);
   useEffect(() => {
     if (!isLoggedIn || !live.numbersV || !selectedRange) return;
     fetchNumbers(selectedRange);
@@ -171,7 +235,7 @@ function DashboardContent() {
       const res = await postApi<any>('/api/range/unassign', { rangeId });
       if (res && res.ok) {
         showToast(`✓ Freed ${count} numbers`, 'success');
-        fetchRanges(true);
+        requestRangesFetch(true);
       }
     } catch { showToast('Unassign failed', 'error'); }
   };
@@ -215,7 +279,13 @@ function DashboardContent() {
               />
             )}
             {activeTab === 'numbers' && selectedRange && (
-              <NumbersView range={selectedRange} numbers={numbers} onBack={() => { setActiveTab('ranges'); setSelectedRange(null); }} onRefresh={() => fetchNumbers(selectedRange)} />
+              <NumbersView
+                range={selectedRange}
+                numbers={numbers}
+                liveTick={numOtpTick}
+                onBack={() => { setActiveTab('ranges'); setSelectedRange(null); }}
+                onRefresh={() => fetchNumbers(selectedRange)}
+              />
             )}
             {activeTab === 'inbox' && <InboxView messages={smsMessages} todayCount={todaySmsCount} weekCount={weekSmsCount} monthCount={monthSmsCount} onRefresh={fetchSmsStream} isLoading={false} />}
             {activeTab === 'add' && <AddNumbersView />}
