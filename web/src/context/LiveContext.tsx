@@ -7,8 +7,6 @@ import type { SmsMessage } from "../types";
 interface LiveCtx {
   status: "live" | "down";
   sms: { count: number; recent: SmsMessage[] };
-  otpAlert: { item: SmsMessage; burst: number; ts: number } | null;
-  clearOtp: () => void;
   rangesV: number; numbersV: number; lbV: number;
   refreshSms: () => Promise<void>;
 }
@@ -23,13 +21,14 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
   const statusRef = useRef(status);
   useEffect(() => { statusRef.current = status; }, [status]);
   const [sms, setSms] = useState<{ count: number; recent: SmsMessage[] }>({ count: 0, recent: [] });
-  const [otpAlert, setOtpAlert] = useState<LiveCtx["otpAlert"]>(null);
   const [rangesV, setRangesV] = useState(0);
   const [numbersV, setNumbersV] = useState(0);
   const [lbV, setLbV] = useState(0);
   const seen = useRef<Set<string>>(new Set());
   const seeded = useRef(false);
 
+  // FIX: otpAlert removed — App.tsx already builds the floating card + sound from live.sms.
+  // The old duplicate was dead weight and risked double logic.
   const refreshSms = async () => {
     const d = await postApi<any>("/api/smscount");
     if (d?.ok) setSms({ count: d.count || 0, recent: d.recent || [] });
@@ -47,8 +46,9 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
         setSms({ count: d.count || 0, recent: d.recent || [] });
         const rec = d.recent || [];
         if (!seeded.current) { seeded.current = true; rec.forEach((r: any) => seen.current.add(keyOf(r))); return; }
-        const fresh = rec.filter((r: any) => !seen.current.has(keyOf(r)));
-        if (fresh.length) { fresh.forEach((r: any) => seen.current.add(keyOf(r))); setOtpAlert({ item: fresh[0], burst: fresh.length, ts: Date.now() }); }
+        rec.forEach((r: any) => seen.current.add(keyOf(r)));
+        // FIX: cap the seen set so it never grows forever (memory) — rebuild from current 50
+        if (seen.current.size > 600) seen.current = new Set(rec.map(keyOf));
       },
       numbers: () => setNumbersV(v => v + 1),
       ranges: () => setRangesV(v => v + 1),
@@ -58,11 +58,12 @@ export function LiveProvider({ children }: { children: React.ReactNode }) {
     return () => { clearInterval(fb); disconnectLive(); };
   }, [session]);
 
-  const clearOtp = () => setOtpAlert(null);
   return (
-    <Ctx.Provider value={{ status, sms, otpAlert, clearOtp, rangesV, numbersV, lbV, refreshSms }}>
+    <Ctx.Provider value={{ status, sms, rangesV, numbersV, lbV, refreshSms }}>
       {children}
     </Ctx.Provider>
   );
 }
+
 export default LiveProvider;
+// === EOF: LiveContext.tsx ===
