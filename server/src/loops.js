@@ -1,27 +1,21 @@
 // Background daemons (single process, PM2-managed). LaMix = source of truth.
-// FIX (v3.1): pool imported for the atomic CDR roll-up in dailyTruncationLoop.
 const { q, PKT_DAY, pool } = require('./db');
 const lx = require('./lamix');
 const sse = require('./sse');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-
 const normT = s => {
   let v = String(s == null ? '' : s).trim();
   if (!v) return v;
-  // If it looks like JS Date.toString() e.g. "Wed Nov 04 2026 12:13:36 GM +0500 (...)"
   if (/^[A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{4}/.test(v)) {
     try { const d = new Date(v); if (!isNaN(d.getTime())) return d.toISOString().replace('T',' ').replace(/\.\d+$/,'').replace(/Z$/,'').trim(); } catch {}
   }
-  // Normal ISO / pg timestamp cleanup
   return v.replace('T', ' ').replace(/\.\d+/, '').replace(/(Z|[+-]\d{2}:?\d{2})$/, '').trim();
 };
-
 const G = global;
 G.__cdrHb = 0; G.__cdrLast = 0; G.__syncHb = 0; G.__reconHb = 0; G.__queueHb = 0; G.__clientsHb = 0;
 G.__reconState = { status: 'idle', fetched: 0, expected: 0, remaining: 0, etaSecs: 0 };
 G.__reconCurve = []; G.__reconDue = 0; G.__reconLast = 0;
 
-// ── number → client attribution map (5s cache) ──
 let _nc = { ts: 0, map: new Map() };
 async function ncMap(){
   if (_nc.map.size && Date.now() - _nc.ts < 5000) return _nc.map;
@@ -31,7 +25,6 @@ async function ncMap(){
 }
 const invalidateNc = () => { _nc.ts = 0; };
 
-// ── per-user SMS payload + targeted push ──
 async function smsPayloadFor(username, clientName){
   const alt = clientName || username;
   const c = await q("SELECT COUNT(*)::int t FROM sms_cdr WHERE time >= " + PKT_DAY + " AND (LOWER(client)=LOWER($1) OR LOWER(client)=LOWER($2))", [username, alt]);
@@ -45,7 +38,7 @@ async function pushSmsTo(users){
   }
 }
 
-// ── BOAT 1: CDR stream (watermark + duplicate-safe inserts) ──
+// ── BOAT 1: CDR stream ──
 async function cdrLoop(){
   while (true) {
     G.__cdrHb = Date.now();
@@ -82,7 +75,10 @@ async function cdrLoop(){
   }
 }
 
-// ── BOAT 2: ranges sync (add/remove detection, auto-release removed ranges) ──
+// ── BOAT 2: ranges sync ──
+// FIX (glitch): broadcasts fire ONLY when the pool signature actually changed.
+// Before this, every 15s tick pushed 'ranges'+'numbers' → the whole UI refetched
+// and flashed on every tab switch. Silent background sync continues as before.
 let _rangeSig = '';
 async function syncLoop(){
   while (true) {
@@ -119,15 +115,18 @@ async function syncLoop(){
           invalidateNc();
         }
         if (ev.length) q("INSERT INTO range_changelog (action,range_id,name,numbers) SELECT v.a,v.id,v.nm,v.n FROM json_to_recordset($1) AS v(a text,id text,nm text,n int)", [JSON.stringify(ev.map(e => ({ a: e.action, id: e.range_id, nm: e.name, n: e.numbers })))]).catch(() => {});
-        if (sig !== _rangeSig) { if (_rangeSig) G.__reconDue = Date.now(); _rangeSig = sig; }
-        sse.broadcast('ranges'); sse.broadcast('numbers');
+        if (sig !== _rangeSig) {
+          if (_rangeSig) G.__reconDue = Date.now();
+          _rangeSig = sig;
+          sse.broadcast('ranges'); sse.broadcast('numbers');
+        }
       }
     } catch (e) { console.error('[sync]', e.message); }
     await sleep(15000);
   }
 }
 
-// ── BOAT 3: full numbers reconcile (LaMix → pool_numbers → user_numbers, auto-truncate vanished) ──
+// ── BOAT 3: full numbers reconcile ──
 async function reconcileLoop(){
   while (true) {
     const idle = Date.now() - (G.__reconLast || 0);
@@ -164,7 +163,7 @@ async function reconcileLoop(){
           await q("UPDATE user_numbers u SET client=p.client_id, updated_at=NOW() FROM pool_numbers p WHERE u.number=p.number AND u.status='active' AND p.status='assigned' AND u.client IS DISTINCT FROM p.client_id");
           await q("UPDATE user_numbers SET status='junk', updated_at=NOW() WHERE status='released' AND NOT EXISTS (SELECT 1 FROM pool_numbers p WHERE p.number=user_numbers.number AND p.status IN ('free','assigned'))");
           await q("DELETE FROM pool_numbers WHERE status='gone' AND updated_at < NOW() - interval '20 minutes'");
-          await q("DELETE FROM user_numbers WHERE status='junk' AND updated_at < NOW() - interval '2 minutes'"); // vanished from LaMix → auto-truncate
+          await q("DELETE FROM user_numbers WHERE status='junk' AND updated_at < NOW() - interval '2 minutes'");
           await q("UPDATE ranges SET last_num_sync=NOW()");
           invalidateNc();
           sse.broadcast('numbers'); sse.broadcast('ranges');
@@ -179,9 +178,7 @@ async function reconcileLoop(){
   }
 }
 
-// ── BOAT 4: allocation queue worker (row-locked, race-free) ──
-// NOTE: alloc_events is written at REQUEST time in alloc.js (both instant and queued
-// paths), so this worker must NOT write them again — that would double-count limits.
+// ── BOAT 4: allocation queue worker ──
 async function queueWorker(){
   while (true) {
     G.__queueHb = Date.now();
@@ -224,8 +221,6 @@ async function clientsLoop(){
         const r = await lx.post('/clients', { username: it.username, name: it.name || it.username,
           canUseApi: !!it.can_use_api, canViewRanges: !!it.can_view_ranges, canUseExtendedApi: !!it.can_use_extended_api });
         const okR = r && !r._error && !r._rateLimited;
-        // Password stays stored in client_queue.generated_password (DB only).
-        // FIX: it is NO LONGER written into the notification (notifications are readable forever).
         await q("UPDATE client_queue SET status=$2, generated_password=$3, result=$4, processed_at=NOW() WHERE id=$1",
           [it.id, okR ? 'done' : 'failed', (r && r.password) || null, JSON.stringify(r || {})]);
         await q("INSERT INTO app_notifs (target,type,title,body,created_by) VALUES ($1,$2,$3,$4,'system')",
@@ -279,13 +274,6 @@ function start(){ cdrLoop(); syncLoop(); reconcileLoop(); queueWorker(); clients
 module.exports = { start, ncMap, invalidateNc, maybeRangeRefresh, pushSmsTo, smsPayloadFor, refreshRange, dailyTruncationLoop };
 
 // ── BOAT 6: CDR rollover (count per user → otp_daily, then wipe raw rows) ──
-// FIX (v3.1): Raw SMS text lives ONLY for the current PKT day. At 05:00 PKT (00:00 UTC) we
-// first COUNT every user's OTPs into otp_daily (one tiny row per user per day), then DELETE
-// the raw rows. Week / Month / All-Time totals everywhere are sums of those tiny rows +
-// today's live count (see user.js, scc.js, admin.js).
-// Count + delete run inside ONE transaction → a row can never be deleted without being
-// counted, and never counted twice. Late rows are simply added on the next pass.
-// First run after deploy automatically backfills otp_daily from the existing CDR history.
 async function dailyTruncationLoop(){
   while (true) {
     try {
@@ -303,7 +291,7 @@ async function dailyTruncationLoop(){
         } finally { cl.release(); }
       }
     } catch (e) { console.error('[retention]', e.message); }
-    await sleep(3600000); // hourly check; purge lands right after 05:00 PKT
+    await sleep(3600000);
   }
 }
 // === EOF: loops.js ===
