@@ -130,11 +130,13 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
   const queueSize = scc?.queue?.size ?? 0;
   const repTeams = report?.teams || [];
   const topMap: Record<string, any> = {}; sccTeams.forEach((t: any) => { topMap[t.prefix] = t.top; });
+  // FIX: Team Report counts keyed by prefix → Team tab cards show REAL today/week numbers
+  const repMap: Record<string, any> = {}; repTeams.forEach((t: any) => { repMap[String(t.prefix || '')] = t; });
   const onlineList = scc?.users?.list || [];
   return (
     <div className="w-full max-w-full overflow-hidden space-y-2 pb-16">
       <PageHead title="Admin Hub" chip={role === 'super' ? 'SUPER' : 'ADMIN'} onBack={onBack}
-        right={<IconBtn onClick={() => { if (tab === 'scc' || tab === 'otp' || tab === 'trep') loadScc(); else if (tab === 'fleet') loadFleet(); else if (tab === 'team') loadTeam(); else if (tab === 'limits') loadLimits(); else if (tab === 'bulk') loadBulk(); else loadCrush(); }} title="Refresh"><RefreshCw className="w-3.5 h-3.5" /></IconBtn>} />
+        right={<IconBtn onClick={() => { if (tab === 'scc' || tab === 'otp' || tab === 'trep') loadScc(); else if (tab === 'fleet') loadFleet(); else if (tab === 'team' || tab === 'trep') loadTeam(); else if (tab === 'limits') loadLimits(); else if (tab === 'bulk') loadBulk(); else loadCrush(); }} title="Refresh"><RefreshCw className="w-3.5 h-3.5" /></IconBtn>} />
       <Card className="p-1.5 grid grid-cols-4 gap-1">
         {TABS.map((t) => {
           const Ic = TAB_ICON[t.id] || Server;
@@ -193,7 +195,7 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
               </span>
             ))}
           </Card>
-          {/* ── FIX: Online members — names shown, max 5, expand for all ── */}
+          {/* ── Online members — names shown, max 5, expand for all ── */}
           <Card className="p-2.5 space-y-1.5">
             <div className="flex items-center justify-between">
               <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-emerald-500 dot-live" />Online · {scc.users?.online ?? 0}</span>
@@ -334,7 +336,7 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
       )}
       {tab === 'team' && (
         <div className="space-y-2">
-          {/* ── Admin List (visible to all admins, demote button super-only) ── */}
+          {/* ── Admin List ── */}
           <Card className="p-3 space-y-2">
             <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1"><Crown className="w-3 h-3 text-amber-500" /> Admins ({admins.length})</span>
             {admins.length === 0 ? <p className="text-[10px] text-slate-400">No admins yet</p> : admins.map((a: any) => (
@@ -350,7 +352,7 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
               </div>
             ))}
           </Card>
-          {/* ── Promote (super + admin) ── */}
+          {/* ── Promote ── */}
           {(role === 'super' || role === 'admin') && (
             <Card className="p-3 space-y-2">
               <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1"><UserPlus className="w-3 h-3 text-cyan-500" /> Promote to Admin</span>
@@ -364,7 +366,7 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
               </div>
             </Card>
           )}
-          {/* ── Create ID (super + admin) ── */}
+          {/* ── Create ID ── */}
           {(role === 'super' || role === 'admin') && (
             <Card className="p-3 space-y-2">
               <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1"><UserPlus className="w-3 h-3 text-cyan-500" /> Create ID</span>
@@ -377,7 +379,7 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
               </div>
             </Card>
           )}
-          {/* ── Team prefix (super + admin) — FIX: own state, no longer clashes with Create ID ── */}
+          {/* ── Team prefix (own state — no clash with Create ID) ── */}
           {(role === 'super' || role === 'admin') && (
             <Card className="p-3 space-y-2">
               <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1"><Server className="w-3 h-3 text-indigo-500" /> Team prefix</span>
@@ -395,7 +397,7 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
               ))}
             </Card>
           )}
-          {/* ── Reset password (super + admin) ── */}
+          {/* ── Reset password ── */}
           {(role === 'super' || role === 'admin') && (
             <Card className="p-3 space-y-2">
               <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1"><KeyRound className="w-3 h-3 text-amber-500" /> Reset password</span>
@@ -405,7 +407,7 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
               </div>
             </Card>
           )}
-          {/* ── Pin User (super + admin) — backend now verifies DB/LaMix first ── */}
+          {/* ── Pin User (backend verifies DB/LaMix) ── */}
           {(role === 'super' || role === 'admin') && (
             <Card className="p-3 space-y-2">
               <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1"><Users className="w-3 h-3 text-emerald-500" /> Pin User to Team</span>
@@ -424,7 +426,7 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
               <p className="text-[9px] text-slate-400 font-semibold">User must exist in DB or LaMix — fake names are rejected.</p>
             </Card>
           )}
-          {/* ── FIX: Pinned Members section with unpin ── */}
+          {/* ── Pinned Members with unpin ── */}
           {pinnedList.length > 0 && (
             <Card className="p-3 space-y-2">
               <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1"><Pin className="w-3 h-3 text-rose-500" /> Pinned Members ({pinnedList.length})</span>
@@ -453,26 +455,29 @@ export const AdminConsoleView: React.FC<Props> = ({ initialTab = 'scc', onBack }
               </div>
             </Card>
           )}
-          {/* ── Teams List (visible to ALL admins) ── */}
+          {/* ── Teams List — FIX: real today/week counts merged from Team Report ── */}
           <div className="flex items-center justify-between px-1">
             <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Teams · {teams.reduce((s, t) => s + (t.count || 0), 0)} clients</span>
             <IconBtn onClick={loadTeam} disabled={teamBusy} title="Refresh"><RefreshCw className={`w-3.5 h-3.5 ${teamBusy ? 'animate-spin text-cyan-500' : ''}`} /></IconBtn>
           </div>
-          {teams.length === 0 ? <Empty icon={Users} text="No teams" /> : teams.map((t) => (
-            <Card key={t.prefix || 'sys'} className="p-2.5 space-y-1.5">
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-[11px] font-black px-1.5 py-0.5 rounded-md bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border border-cyan-500/20">{t.prefix || 'SYS'}</span>
-                <span className="flex-1 text-[11px] font-bold truncate text-slate-900 dark:text-white">{t.label || t.admin}</span>
-                <span className="font-mono text-[10px] font-bold text-emerald-500">{t.otpToday ?? 0} today</span>
-              </div>
-              <div className="flex flex-wrap gap-1">
-                {(t.clients || []).map((c: any) => (
-                  <span key={c.id || c.username} className="px-1.5 py-0.5 rounded-md text-[9px] font-mono font-bold bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700">{pu(c.username)}{c.pinned ? ' 📌' : ''}</span>
-                ))}
-                {!t.clients?.length && <span className="text-[10px] text-slate-400">no clients</span>}
-              </div>
-            </Card>
-          ))}
+          {teams.length === 0 ? <Empty icon={Users} text="No teams" /> : teams.map((t) => {
+            const rt = repMap[t.prefix || ''] || {};
+            return (
+              <Card key={t.prefix || 'sys'} className="p-2.5 space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-[11px] font-black px-1.5 py-0.5 rounded-md bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border border-cyan-500/20">{t.prefix || 'SYS'}</span>
+                  <span className="flex-1 text-[11px] font-bold truncate text-slate-900 dark:text-white">{t.label || t.admin}</span>
+                  <span className="font-mono text-[10px] font-bold text-emerald-500 shrink-0">{(rt.otpToday ?? 0).toLocaleString()} today · <span className="text-slate-400">wk {(rt.otpWeek ?? 0).toLocaleString()}</span></span>
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {(t.clients || []).map((c: any) => (
+                    <span key={c.id || c.username} className="px-1.5 py-0.5 rounded-md text-[9px] font-mono font-bold bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700">{pu(c.username)}{c.pinned ? ' 📌' : ''}</span>
+                  ))}
+                  {!t.clients?.length && <span className="text-[10px] text-slate-400">no clients</span>}
+                </div>
+              </Card>
+            );
+          })}
         </div>
       )}
       {tab === 'limits' && (
