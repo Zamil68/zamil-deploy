@@ -235,24 +235,44 @@ R.post('/api/dor', A.verify, async (req, res) => {
 });
 
 // CLI Insights — computed from sms_cdr (zero scraping)
-R.post('/api/cli/gate', A.verify, async (req, res) => { const un = String(req.user.username).toLowerCase(); if (A.isAdminish(await A.getRole(un))) return ok(res, { insights: true }); const r = await q("SELECT allowed FROM cli_access WHERE username=$1", [un]); return ok(res, { insights: !!r.rows[0]?.allowed }); });
+R.post('/api/cli/gate', A.verify, async (req, res) => { 
+  const un = String(req.user.username).toLowerCase(); 
+  if (A.isAdminish(await A.getRole(un))) return ok(res, { insights: true }); 
+  const r = await q("SELECT allowed FROM cli_access WHERE username=$1", [un]); 
+  return ok(res, { insights: !!r.rows[0]?.allowed }); 
+});
+
 R.post('/api/cli/refresh', A.verify, (req, res) => ok(res));
-R.post('/api/cli/analysis', A.verify, async (req, res) => { const unG = String(req.user.username).toLowerCase(); if (!A.isAdminish(await A.getRole(unG))) { const g = await q("SELECT allowed FROM cli_access WHERE username=$1", [unG]); if (!g.rows[0]?.allowed) return res.status(403).json({ ok: false, error: 'CLI not enabled for you' }); }
+
+R.post('/api/cli/analysis', A.verify, async (req, res) => { 
+  const unG = String(req.user.username).toLowerCase(); 
+  if (!A.isAdminish(await A.getRole(unG))) { 
+    const g = await q("SELECT allowed FROM cli_access WHERE username=$1", [unG]); 
+    if (!g.rows[0]?.allowed) return res.status(403).json({ ok: false, error: 'CLI not enabled for you' }); 
+  }
+  
   const tot = await q("SELECT COUNT(*)::int s, COUNT(DISTINCT cli)::int c FROM sms_cdr WHERE time >= " + PKT_DAY);
   const byCli = await q("SELECT cli, COUNT(*)::int n, MAX(time) ls FROM sms_cdr WHERE time >= " + PKT_DAY + " AND cli<>'' GROUP BY 1 ORDER BY 2 DESC LIMIT 60");
   const byCliRange = await q("SELECT cli, COALESCE(NULLIF(range,''),'Unknown') rg, COUNT(*)::int n FROM sms_cdr WHERE time >= " + PKT_DAY + " AND cli<>'' GROUP BY 1,2 ORDER BY 3 DESC LIMIT 400");
   const samples = await q("SELECT DISTINCT ON (cli) cli, content, time FROM sms_cdr WHERE time >= " + PKT_DAY + " AND cli<>'' ORDER BY cli, time DESC");
+  
   const cm = {}; const tm = {};
   byCliRange.rows.forEach(r => { (cm[r.cli] = cm[r.cli] || []).push(r); });
   samples.rows.forEach(r => { tm[r.cli] = r; });
+  
   const ctryCount = {};
   byCliRange.rows.forEach(r => { const c = countryOf(r.rg); ctryCount[c] = (ctryCount[c] || 0) + r.n; });
   const topCountries = Object.entries(ctryCount).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([name, n]) => ({ name, n }));
+  
   ok(res, {
     stats: { totalSms: tot.rows[0].s, totalCli: tot.rows[0].c, topCountry: topCountries[0] || null, topCountries },
-    list: byCli.rows.map(r => ({ cli: r.cli, count: r.n, lastSeen: r.ls,
+    list: byCli.rows.map(r => ({ 
+      cli: r.cli, 
+      count: r.n, 
+      lastSeen: r.ls,
       countries: (cm[r.cli] || []).slice(0, 6).map(x => ({ name: countryOf(x.rg), range: x.rg, n: x.n })),
-      samples: tm[r.cli] ? [{ t: tm[r.cli].time, text: tm[r.cli].content }] : [] }))
+      samples: tm[r.cli] ? [{ t: tm[r.cli].time, text: tm[r.cli].content }] : [] 
+    }))
   });
 });
 
@@ -262,9 +282,21 @@ R.post('/api/stats', A.verify, async (req, res) => {
   const isSuper = role === 'super';
   const t = await q("SELECT COUNT(*) FILTER (WHERE status='free')::int f, COUNT(*) FILTER (WHERE status='assigned')::int a FROM pool_numbers");
   const rr = await q("SELECT p.range_id, COALESCE(r.name,p.range_id) AS name, COUNT(*) FILTER (WHERE p.status='free')::int free, COUNT(*) FILTER (WHERE p.status='assigned')::int assigned FROM pool_numbers p LEFT JOIN ranges r ON r.range_id=p.range_id GROUP BY 1,2");
+  
   const cm = {};
-  rr.rows.forEach(r => { const c = countryOf(r.name) || 'Other'; if (!cm[c]) cm[c] = { country: c, ranges: {} }; if (!cm[c].ranges[r.name]) cm[c].ranges[r.name] = { range: r.name, available: 0, total: 0 }; cm[c].ranges[r.name].total += r.free + r.assigned; cm[c].ranges[r.name].available += r.free; });
-  const countries = Object.values(cm).map(c => ({ country: c.country, ranges: Object.values(c.ranges).sort((a, b) => b.available - a.available) })).sort((a, b) => a.country.localeCompare(b.country));
+  rr.rows.forEach(r => { 
+    const c = countryOf(r.name) || 'Other'; 
+    if (!cm[c]) cm[c] = { country: c, ranges: {} }; 
+    if (!cm[c].ranges[r.name]) cm[c].ranges[r.name] = { range: r.name, available: 0, total: 0 }; 
+    cm[c].ranges[r.name].total += r.free + r.assigned; 
+    cm[c].ranges[r.name].available += r.free; 
+  });
+  
+  const countries = Object.values(cm).map(c => ({ 
+    country: c.country, 
+    ranges: Object.values(c.ranges).sort((a, b) => b.available - a.available) 
+  })).sort((a, b) => a.country.localeCompare(b.country));
+  
   let otpToday = 0, otpWeek = 0, otpMonth = 0, mostActiveRange = '—', mostActiveCount = 0;
   if (isSuper) {
     otpToday = (await q("SELECT COUNT(*)::int c FROM sms_cdr WHERE time >= " + PKT_DAY)).rows[0].c;
@@ -273,7 +305,20 @@ R.post('/api/stats', A.verify, async (req, res) => {
     const ma = await q("SELECT COALESCE(NULLIF(range,''),'Unknown') rn, COUNT(*)::int c FROM sms_cdr WHERE time >= " + PKT_DAY + " GROUP BY 1 ORDER BY 2 DESC LIMIT 1");
     if (ma.rows[0]) { mostActiveRange = ma.rows[0].rn; mostActiveCount = ma.rows[0].c; }
   }
-  ok(res, { totalCountries: countries.length, totalRanges: rr.rows.length, totalNumbers: t.rows[0].f + t.rows[0].a, allocated: t.rows[0].a, available: t.rows[0].f, otpToday, otpWeek, otpMonth, mostActiveRange, mostActiveCount, countries });
+  
+  ok(res, { 
+    totalCountries: countries.length, 
+    totalRanges: rr.rows.length, 
+    totalNumbers: t.rows[0].f + t.rows[0].a, 
+    allocated: t.rows[0].a, 
+    available: t.rows[0].f, 
+    otpToday, 
+    otpWeek, 
+    otpMonth, 
+    mostActiveRange, 
+    mostActiveCount, 
+    countries 
+  });
 });
 
 module.exports = R;
