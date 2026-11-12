@@ -73,10 +73,9 @@ function DashboardContent() {
     } catch {}
   }, []);
   // ── FIX: ranges refresh that NEVER drops an update ──
-  // Old code: if a fetch happened <8s ago, the SSE "ranges changed" event was ignored forever
-  // → new range missing from the dashboard. Now: too soon? schedule a retry exactly when the
-  // throttle window ends, so every change eventually lands. force=true jumps the queue
-  // (used after the user's own allocation / unassign).
+  // Old code: if a fetch happened <8s ago, the SSE "ranges changed" event was ignored
+  // forever → new range missing from the dashboard. Now: too soon? schedule a retry
+  // exactly when the throttle window ends. force=true jumps the queue.
   const requestRangesFetch = useCallback((force = false) => {
     const now = Date.now();
     const wait = force ? 0 : Math.max(0, 8000 - (now - lastRangeFetchRef.current));
@@ -174,6 +173,15 @@ function DashboardContent() {
     postApi<any>('/api/smscount-range', { range: 'week' }).then((r) => r?.ok && setWeekSmsCount(r.count || 0));
     postApi<any>('/api/smscount-range', { range: 'month' }).then((r) => r?.ok && setMonthSmsCount(r.count || 0));
   }, [isLoggedIn, fetchRanges, fetchSmsStream, checkDorAccess, fetchNotifications]);
+  // ── FIX (Step 3): live red notification pill — re-check unread every 40s and on tab focus ──
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    const iv = setInterval(fetchNotifications, 40000);
+    const onVis = () => { if (!document.hidden) fetchNotifications(); };
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('focus', onVis);
+    return () => { clearInterval(iv); document.removeEventListener('visibilitychange', onVis); window.removeEventListener('focus', onVis); };
+  }, [isLoggedIn, fetchNotifications]);
   // ── FIX: RESTORE last position once per login (tab, sub-page, admin tab, lb range, open range) ──
   useEffect(() => {
     if (!isLoggedIn || navRestored) return;
@@ -205,7 +213,7 @@ function DashboardContent() {
     if (!rec.length && (live.sms?.count || 0) === 0) return;
     ingestSms(live.sms.count || 0, rec);
   }, [live.sms, isLoggedIn, ingestSms]);
-  // ── Auto-refresh when DB changes — FIX: never drops the update (retry scheduled) ──
+  // ── Auto-refresh when DB changes (new range / numbers / leaderboard) ──
   useEffect(() => {
     if (!isLoggedIn || !live.rangesV) return;
     requestRangesFetch(false);
@@ -240,7 +248,7 @@ function DashboardContent() {
     } catch { showToast('Unassign failed', 'error'); }
   };
   if (!isLoggedIn) return <LoginView />;
-  const unreadCount = notifications.filter((n) => n.read).length;
+  const unreadCount = notifications.filter((n) => !n.read).length;
   // Zoom applies to the user side only — Admin Hub / CLI Insights always stay at normal size
   const pageZoom = (subPage === 'admin' || subPage === 'cli') ? 1 : zoom;
   return (
