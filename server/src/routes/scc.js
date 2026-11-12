@@ -9,28 +9,29 @@ R.post('/api/scc/status', A.verify, async (req, res) => {
   if (_cache.payload && Date.now() - _cache.ts < 8000) return ok(res, _cache.payload);
   const now = Date.now();
   const buck = (rows, get, step = 300000) => { const out = new Array(12).fill(0); rows.forEach(r => { const i = 11 - Math.floor((now - new Date(get(r)).getTime()) / step); if (i >= 0 && i < 12) out[i]++; }); return out; };
-  const [pingHour, cdrHour, qRow, doneRow, poolRow, todayRow, yestRow, incRows] = await Promise.all([
+  const [pingHour, cdrHour, qRow, doneRow, poolRow, todayRow, incRows] = await Promise.all([
     q("SELECT username, created_at FROM api_ping_log WHERE created_at >= NOW() - interval '60 minutes' LIMIT 3000"),
     q("SELECT time FROM sms_cdr WHERE time >= NOW() - interval '60 minutes' LIMIT 3000"),
     q("SELECT COUNT(*)::int n, MIN(created_at) t FROM alloc_queue WHERE status='pending'"),
     q("SELECT COALESCE(round(AVG(EXTRACT(EPOCH FROM (processed_at-created_at))/60),1),0)::float m FROM alloc_queue WHERE status='done' AND processed_at >= NOW() - interval '60 minutes'"),
     q("SELECT COUNT(*) FILTER (WHERE status='free')::int f, COUNT(*) FILTER (WHERE status='assigned')::int a FROM pool_numbers"),
     q("SELECT COUNT(*)::int c FROM sms_cdr WHERE time >= " + PKT_DAY),
-    // FIX (CDR retention): yesterday's count comes from the otp_daily summary table,
-    // because raw sms_cdr rows now live only for the current PKT day.
-    q("SELECT COALESCE(SUM(count),0)::int c FROM otp_daily WHERE day = DATE(" + PKT_DAY + ") - 1"),
     q("SELECT id, type, severity, title, message, created_at FROM system_incidents WHERE status='pending' ORDER BY created_at DESC LIMIT 20")]);
-  const today = todayRow.rows[0].c, yest = yestRow.rows[0].c;
-  // FIX (CDR retention): Week/Month/All-Time come from otp_daily (1 tiny row per user per day) + today's live count
-  const otpSum = await q("SELECT COALESCE(SUM(count) FILTER (WHERE day >= DATE(" + PKT_DAY + ") - 6),0)::int w, COALESCE(SUM(count) FILTER (WHERE day >= DATE(" + PKT_DAY + ") - 29),0)::int m, COALESCE(SUM(count),0)::int t FROM otp_daily");
-  const dayRows = await q("SELECT day::text AS d, SUM(count)::int c FROM otp_daily WHERE day >= DATE(" + PKT_DAY + ") - 6 AND day < DATE(" + PKT_DAY + ") GROUP BY 1");
-  const weekBuckets = [];
-  for (let i = 6; i >= 0; i--) {
-    if (i === 0) { weekBuckets.push(today); continue; } // today = live raw count
-    const dd = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
-    const hit = dayRows.rows.find(x => String(x.d).slice(0, 10) === dd);
-    weekBuckets.push(hit ? hit.c : 0);
-  }
+  const today = todayRow.rows[0].c;
+  // FIX (Week/Month missing un-rolled days): merge RAW per-day counts (any day still in
+  // sms_cdr, including today) WITH rolled-up otp_daily per-day counts. Complete & no dupes.
+  const rawDays = await q("SELECT DATE(time)::text AS d, COUNT(*)::int c FROM sms_cdr WHERE time >= " + PKT_DAY + " - interval '29 days' GROUP BY 1");
+  const storedDays = await q("SELECT day::text AS d, SUM(count)::int c FROM otp_daily WHERE day >= DATE(" + PKT_DAY + ") - 29 GROUP BY 1");
+  const merged = {};
+  storedDays.rows.forEach(r => { const k = String(r.d).slice(0, 10); merged[k] = (merged[k] || 0) + r.c; });
+  rawDays.rows.forEach(r => { const k = String(r.d).slice(0, 10); merged[k] = (merged[k] || 0) + r.c; });
+  const dayKey = i => new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+  const yest = merged[dayKey(1)] || 0;
+  let week = 0; for (let i = 0; i < 7; i++) week += merged[dayKey(i)] || 0;
+  let month = 0; for (let i = 0; i < 30; i++) month += merged[dayKey(i)] || 0;
+  const otpAll = await q("SELECT COALESCE(SUM(count),0)::int t FROM otp_daily");
+  const otpTotal = otpAll.rows[0].t + today;
+  const weekBuckets = []; for (let i = 6; i >= 0; i--) weekBuckets.push(merged[dayKey(i)] || 0);
   const cliRows = await q("SELECT client, COUNT(*)::int c FROM sms_cdr WHERE time >= " + PKT_DAY + " AND client IS NOT NULL AND client<>'' GROUP BY 1 ORDER BY 2 DESC LIMIT 300");
   const prefRows = await q("SELECT prefix FROM team_prefixes ORDER BY LENGTH(prefix) DESC");
   const teamAgg = {};
@@ -52,9 +53,7 @@ R.post('/api/scc/status', A.verify, async (req, res) => {
   const onlineSet = new Set(sse.online());
   pingHour.rows.forEach(p => { if (now - new Date(p.created_at).getTime() < 600000) onlineSet.add(p.username); });
   const online = onlineSet.size;
-  // FIX (Step 4): seed lastSeen with EVERY live SSE connection (ago 0). Before this, idle
-  // SSE users counted in "online" but never appeared in the name list (5 online, 2 names).
-  const lastSeen = {};
+  const lastSeen = {}; 
   for (const u of sse.online()) lastSeen[u] = now;
   pingHour.rows.forEach(p => { const t = new Date(p.created_at).getTime(); if (now - t < 600000 && (!lastSeen[p.username] || t > lastSeen[p.username])) lastSeen[p.username] = t; });
   const activeList = Object.keys(lastSeen).map(u => ({ u, ago: Math.max(0, Math.round((now - lastSeen[u]) / 60000)) })).sort((a, b) => a.ago - b.ago).slice(0, 200);
@@ -81,7 +80,7 @@ R.post('/api/scc/status', A.verify, async (req, res) => {
     load: { perMin: Math.round(pingHour.rows.length / 60), lastHour: pingHour.rows.length, buckets: buck(pingHour.rows, r => r.created_at), users: userBuckets.map(s => s.size) },
     daily: { today, yesterday: yest, growthPct: yest ? Math.round(((today - yest) / yest) * 100) : (today ? 100 : 0) },
     numbers: { total: pTotal, free: poolRow.rows[0].f, assigned: poolRow.rows[0].a, utilPct: pTotal ? Math.round((poolRow.rows[0].a / pTotal) * 100) : 0, lastReconcile: G.__reconHb ? Math.round((now - G.__reconHb) / 60000) + 'm ago' : 'never' },
-    alerts, incidents: incRows.rows, otp: { week: otpSum.rows[0].w + today, month: otpSum.rows[0].m + today, total: otpSum.rows[0].t + today }, weekBuckets, teams: teamList };
+    alerts, incidents: incRows.rows, otp: { week, month, total: otpTotal }, weekBuckets, teams: teamList };
   _cache = { ts: Date.now(), payload };
   ok(res, payload);
 });
