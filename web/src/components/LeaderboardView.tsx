@@ -67,45 +67,155 @@ const ChangeChip: React.FC<{ u: LeaderboardUser }> = ({ u }) => {
 };
 const StreakChip: React.FC<{ n?: number }> = ({ n }) => (n && n >= 2 ? <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-orange-500/15 text-orange-600 dark:text-orange-400 border border-orange-500/30 text-[8px] font-black font-mono"><Flame className="w-2.5 h-2.5" />{n}d</span> : null);
 // ── Brand-color Top 3 card: cyan/sky/indigo gradients, crown/star icons, trophy, ✨ sparkles, FULL name ──
-const TopCard: React.FC<{ u: LeaderboardUser; rank: number; share: number; showMove: boolean }> = ({ u, rank, share, showMove }) => {
+
+
+const TopCard: React.FC<{ u: LeaderboardUser; rank: number; share: number; showMove: boolean }> = ({ u, rank, showMove }) => {
   const t = rank === 1
-    ? { card: 'bg-[linear-gradient(160deg,#22d3ee_0%,#0ea5e9_38%,#4f46e5_100%)]', ring: 'ring-cyan-300/60', icon: '👑', label: '1st', shadow: 'shadow-cyan-600/30', sub: 'OTP Champion' }
+    ? {
+        card: 'bg-[linear-gradient(160deg,#22d3ee_0%,#0ea5e9_38%,#4f46e5_100%)]',
+        ring: 'ring-cyan-300/60',
+        shadow: 'shadow-cyan-600/30',
+        sub: 'OTP Champion',
+        medal: '#fbbf24',
+        medalDark: '#d97706',
+        medalLight: '#fef3c7',
+      }
     : rank === 2
-      ? { card: 'bg-[linear-gradient(160deg,#7dd3fc_0%,#38bdf8_40%,#0369a1_100%)]', ring: 'ring-sky-300/60', icon: '⭐', label: '2nd', shadow: 'shadow-sky-600/30', sub: 'Runner-up' }
-      : { card: 'bg-[linear-gradient(160deg,#a5b4fc_0%,#818cf8_40%,#4f46e5_100%)]', ring: 'ring-indigo-300/60', icon: '🌟', label: '3rd', shadow: 'shadow-indigo-600/30', sub: 'Third place' };
+      ? {
+          card: 'bg-[linear-gradient(160deg,#7dd3fc_0%,#38bdf8_40%,#0369a1_100%)]',
+          ring: 'ring-sky-300/60',
+          shadow: 'shadow-sky-600/30',
+          sub: 'Runner-up',
+          medal: '#e2e8f0',
+          medalDark: '#94a3b8',
+          medalLight: '#ffffff',
+        }
+      : {
+          card: 'bg-[linear-gradient(160deg,#a5b4fc_0%,#818cf8_40%,#4f46e5_100%)]',
+          ring: 'ring-indigo-300/60',
+          shadow: 'shadow-indigo-600/30',
+          sub: 'Third place',
+          medal: '#d97706',
+          medalDark: '#92400e',
+          medalLight: '#fcd34d',
+        };
+
+  const name = prettyUser(u.username);
+  const streak = u.streak || 0;
+  const move = u.rankChange || 0;
+
+  const Medal = () => (
+    <svg
+      viewBox="0 0 48 48"
+      className="w-9 h-9 shrink-0 drop-shadow"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-label={rank === 1 ? 'Gold medal' : rank === 2 ? 'Silver medal' : 'Bronze medal'}
+    >
+      <path d="M14 3H23L28 19L19 24L10 13L14 3Z" fill={t.medalDark} stroke="white" strokeOpacity=".3" strokeWidth="1" />
+      <path d="M25 3H34L38 13L29 24L20 19L25 3Z" fill={t.medal} stroke="white" strokeOpacity=".3" strokeWidth="1" />
+      <circle cx="24" cy="29" r="15" fill={t.medalDark} />
+      <circle cx="24" cy="27" r="13" fill={t.medal} stroke={t.medalLight} strokeWidth="1.5" />
+      <circle cx="24" cy="27" r="9" fill="none" stroke={t.medalLight} strokeOpacity=".8" strokeWidth="1" />
+      <path d="M24 19L26.3 24L32 24.7L27.8 28.5L29 34L24 31.2L19 34L20.2 28.5L16 24.7L21.7 24L24 19Z" fill={t.medalLight} />
+    </svg>
+  );
+
   return (
     <div className={`relative flex-1 max-w-[150px] rounded-2xl ${t.card} ring-1 ${t.ring} shadow-xl ${t.shadow} overflow-hidden p-3 flex flex-col gap-2 text-white ${rank === 1 ? 'min-h-[215px]' : 'min-h-[195px] mt-5'} animate-in zoom-in-95 duration-300`}>
+
       <div className="podium-shine absolute inset-0 opacity-20 pointer-events-none" />
+
       <span className="lb-spark absolute text-white/80 text-[10px] top-2 left-3 pointer-events-none">✨</span>
       <span className="lb-spark absolute text-white/60 text-[9px] bottom-12 right-2 pointer-events-none" style={{ animationDelay: '1.2s' }}>✨</span>
+
       {rank === 1 && <Confetti />}
+
+      {/* OTP Count + Avatar */}
       <div className="flex items-start justify-between gap-2 relative">
         <div>
-          <span className="lb-emoji text-lg leading-none block drop-shadow">{t.icon}</span>
-          <div className="font-heading font-extrabold text-3xl leading-none tabular-nums mt-1 drop-shadow-sm">{u.count.toLocaleString()}</div>
-          <div className="text-[7px] font-bold uppercase tracking-widest text-white/75">OTPs</div>
+          <div
+  className="font-heading font-extrabold leading-none tabular-nums mt-1 drop-shadow-sm whitespace-nowrap"
+  style={{
+    fontSize: `${Math.max(15, Math.min(30, 120 / Math.max(u.count.toLocaleString().length, 1)))}px`,
+  }}
+>
+  {u.count.toLocaleString('en-US')}
+</div>
+          <div className="text-[7px] font-bold uppercase tracking-widest text-white/75">
+            OTPs
+          </div>
         </div>
-        <div className="w-10 h-10 rounded-full overflow-hidden ring-2 ring-white/60 shrink-0 bg-white/20"><AnimatedAvatar name={u.username} rank={rank} size="w-10 h-10" /></div>
-      </div>
-      <div className="grid grid-cols-3 gap-1 relative">
-        <div><div className="font-mono text-[10px] font-black">{share}%</div><div className="text-[7px] font-bold uppercase tracking-wider text-white/75">Share</div></div>
-        <div><div className="font-mono text-[10px] font-black">{u.streak || 0}d</div><div className="text-[7px] font-bold uppercase tracking-wider text-white/75">Streak</div></div>
-        <div><div className="font-mono text-[10px] font-black">{!showMove ? '—' : u.prevRank == null ? 'NEW' : (u.rankChange || 0) > 0 ? `+${u.rankChange}` : (u.rankChange || 0) < 0 ? `${u.rankChange}` : '—'}</div><div className="text-[7px] font-bold uppercase tracking-wider text-white/75">Move</div></div>
-      </div>
-      <div className="mt-auto flex items-end justify-between gap-1.5 relative">
-        <div className="min-w-0 flex-1">
-          {/* FULL name — wraps, never truncated */}
-          <div className="font-heading font-extrabold text-[12px] leading-tight break-words whitespace-normal drop-shadow-sm">{prettyUser(u.username)}</div>
-          <div className="text-[8px] font-bold text-white/75">{t.sub}</div>
-        </div>
-        <div className="relative shrink-0">
-          <Trophy className="w-9 h-9 text-white opacity-95 drop-shadow" strokeWidth={1.7} />
-          <span className="absolute inset-0 flex items-center justify-center font-heading font-extrabold text-[9px] text-white pt-1.5">{t.label}</span>
+
+        <div className="w-10 h-10 rounded-full overflow-hidden ring-2 ring-white/60 shrink-0 bg-white/20">
+          <AnimatedAvatar name={u.username} rank={rank} size="w-10 h-10" />
         </div>
       </div>
+
+      {/* FULL USERNAME - Above the bottom stats */}
+      <div className="relative w-full min-w-0 mt-1">
+        <div
+          className="font-heading font-extrabold leading-tight whitespace-nowrap text-white drop-shadow-sm"
+          style={{
+            fontSize: `${Math.max(5, Math.min(12, 120 / Math.max(name.length, 1)))}px`,
+          }}
+          title={name}
+        >
+          {name}
+        </div>
+      </div>
+
+      {/* Bottom: Streak + Move + Medal */}
+      <div className="mt-auto flex items-center justify-between gap-1 relative">
+
+        {/* Streak icon + number only */}
+        <div
+          className="flex items-center gap-1 shrink-0"
+          title={`Streak: ${streak} days`}
+        >
+          <Flame className="w-3 h-3 text-orange-200" />
+          <span className="font-mono text-[10px] font-black">
+            {streak}
+          </span>
+        </div>
+
+        {/* Position change icon + number only */}
+        <div
+          className="flex items-center gap-1 shrink-0"
+          title={!showMove ? 'Position change unavailable' : u.prevRank == null ? 'New' : `Position change: ${move}`}
+        >
+          {!showMove ? (
+            <Sparkles className="w-3 h-3 text-white" />
+          ) : u.prevRank == null ? (
+            <Sparkles className="w-3 h-3 text-white" />
+          ) : move > 0 ? (
+            <ArrowUp className="w-3 h-3 text-emerald-200" />
+          ) : move < 0 ? (
+            <ArrowDown className="w-3 h-3 text-rose-200" />
+          ) : (
+            <Minus className="w-3 h-3 text-white/70" />
+          )}
+
+          <span className="font-mono text-[10px] font-black">
+            {!showMove ? '—' : u.prevRank == null ? '0' : Math.abs(move)}
+          </span>
+        </div>
+
+        {/* SVG Medal */}
+        <Medal />
+
+      </div>
+
+      {/* Rank description */}
+      <div className="relative text-[8px] font-bold text-white/75 -mt-1">
+        {t.sub}
+      </div>
+
     </div>
   );
 };
+
+
 interface Props { data: LeaderboardData; activeRange: 'today' | 'week' | 'month'; onChangeRange: (r: 'today' | 'week' | 'month') => void; onRefresh: () => Promise<void>; isLoading: boolean; }
 export const LeaderboardView: React.FC<Props> = ({ data, activeRange, onChangeRange, onRefresh, isLoading }) => {
   const { username } = useAuth();
