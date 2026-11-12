@@ -368,9 +368,12 @@ R.post('/api/admin/team-report', A.verify, async (req, res) => {
   if (!await needAdmin(req, res)) return;
   const all = await prefixes(), pm = await pins();
   const today = await q("SELECT client, COUNT(*)::int c FROM sms_cdr WHERE time >= " + PKT_DAY + " AND client IS NOT NULL GROUP BY 1");
+  // FIX: week = otp_daily rolled days + RAW past-day rows not rolled yet + today's live rows
   const wk = await q("SELECT username AS client, SUM(count)::int c FROM otp_daily WHERE day >= DATE(" + PKT_DAY + ") - 6 AND day < DATE(" + PKT_DAY + ") GROUP BY 1");
+  const rawWk = await q("SELECT client, COUNT(*)::int c FROM sms_cdr WHERE time >= " + PKT_DAY + " - interval '6 days' AND time < " + PKT_DAY + " AND client IS NOT NULL GROUP BY 1");
   const wMap = {};
-  wk.rows.forEach(r => { wMap[r.client] = r.c; });
+  wk.rows.forEach(r => { wMap[r.client] = (wMap[r.client] || 0) + r.c; });
+  rawWk.rows.forEach(r => { wMap[r.client] = (wMap[r.client] || 0) + r.c; });
   today.rows.forEach(r => { wMap[r.client] = (wMap[r.client] || 0) + r.c; });
   const weekRows = Object.entries(wMap).map(([client, c]) => ({ client, c }));
   const data = await lx.get('/clients', { limit: 500 });
