@@ -52,8 +52,11 @@ R.post('/api/scc/status', A.verify, async (req, res) => {
   const onlineSet = new Set(sse.online());
   pingHour.rows.forEach(p => { if (now - new Date(p.created_at).getTime() < 600000) onlineSet.add(p.username); });
   const online = onlineSet.size;
-  const lastSeen = {}; pingHour.rows.forEach(p => { const t = new Date(p.created_at).getTime(); if (now - t < 600000 && (!lastSeen[p.username] || t > lastSeen[p.username])) lastSeen[p.username] = t; });
-  // FIX: return the FULL online name list (was capped at 6) — the Admin Hub shows 5 + "expand"
+  // FIX (Step 4): seed lastSeen with EVERY live SSE connection (ago 0). Before this, idle
+  // SSE users counted in "online" but never appeared in the name list (5 online, 2 names).
+  const lastSeen = {};
+  for (const u of sse.online()) lastSeen[u] = now;
+  pingHour.rows.forEach(p => { const t = new Date(p.created_at).getTime(); if (now - t < 600000 && (!lastSeen[p.username] || t > lastSeen[p.username])) lastSeen[p.username] = t; });
   const activeList = Object.keys(lastSeen).map(u => ({ u, ago: Math.max(0, Math.round((now - lastSeen[u]) / 60000)) })).sort((a, b) => a.ago - b.ago).slice(0, 200);
   const userBuckets = Array.from({ length: 12 }, () => new Set()); pingHour.rows.forEach(p => { const i = 11 - Math.floor((now - new Date(p.created_at).getTime()) / 300000); if (i >= 0 && i < 12) userBuckets[i].add(p.username); });
   const qSize = qRow.rows[0].n, oldestMin = qRow.rows[0].t ? Math.round((now - new Date(qRow.rows[0].t).getTime()) / 60000) : 0;
