@@ -30,8 +30,8 @@ R.post('/api/smscount', A.verify, async (req, res) => {
   ok(res, { count: c.rows[0].t, recent: r.rows });
 });
 
-// CDR retention: raw sms_cdr lives only for the current PKT day.
-// Week/Month = today's live count + stored per-user day counters in otp_daily.
+// FIX (Week/Month missing yesterday): count RAW rows inside the whole window (today + any
+// day not rolled into otp_daily yet) PLUS rolled-up days. No missing days, no double count.
 R.post('/api/smscount-range', A.verify, async (req, res) => {
   const u = req.user, alt = u.clientName || u.username, rg = req.body.range;
   if (rg !== 'week' && rg !== 'month') {
@@ -40,9 +40,9 @@ R.post('/api/smscount-range', A.verify, async (req, res) => {
   }
   const days = rg === 'week' ? 6 : 29;
   const r = await q(
-    "SELECT (SELECT COUNT(*)::int FROM sms_cdr WHERE time >= " + PKT_DAY + " AND (LOWER(client)=LOWER($2) OR LOWER(client)=LOWER($3))) + " +
-    "(SELECT COALESCE(SUM(count),0)::int FROM otp_daily WHERE day >= DATE(" + PKT_DAY + ") - $1 AND day < DATE(" + PKT_DAY + ") AND username IN (LOWER($2), LOWER($3))) AS t",
-    [days, u.username, alt]);
+    "SELECT (SELECT COUNT(*)::int FROM sms_cdr WHERE time >= " + PKT_DAY + " - interval '" + days + " days' AND (LOWER(client)=LOWER($1) OR LOWER(client)=LOWER($2))) + " +
+    "(SELECT COALESCE(SUM(count),0)::int FROM otp_daily WHERE day >= DATE(" + PKT_DAY + ") - $3 AND day < DATE(" + PKT_DAY + ") AND username IN (LOWER($1), LOWER($2))) AS t",
+    [u.username, alt, days]);
   ok(res, { count: r.rows[0].t, byNumber: {}, byRange: {} });
 });
 
@@ -67,20 +67,17 @@ const prevDayStr = d => new Date(new Date(d + 'T00:00:00Z').getTime() - 86400000
 R.post('/api/leaderboard', A.verify, async (req, res) => {
   const rg = req.body.range || 'today';
   let rows = [];
-  // 1. Data (today = live raw rows; week/month = today's live + otp_daily stored counters)
+  // 1. Data — today = raw only; week/month = RAW inside window + otp_daily rolled days
   if (rg === 'today') {
     const r = await q(
-      "SELECT client AS username, COUNT(*)::int AS count FROM sms_cdr WHERE time >= " +
-      PKT_DAY +
-      " AND client IS NOT NULL AND client<>'' AND LOWER(client)<>'system generated' GROUP BY 1 ORDER BY 2 DESC LIMIT 50"
-    );
+      "SELECT client AS username, COUNT(*)::int AS count FROM sms_cdr WHERE time >= " + PKT_DAY +
+      " AND client IS NOT NULL AND client<>'' AND LOWER(client)<>'system generated' GROUP BY 1 ORDER BY 2 DESC LIMIT 50");
     rows = r.rows;
   } else {
     const days = rg === 'week' ? 6 : 29;
     const r = await q(
       "SELECT COALESCE(t.username, p.username) AS username, (COALESCE(t.c,0) + COALESCE(p.c,0))::int AS count FROM " +
-      "(SELECT LOWER(client) AS username, COUNT(*)::int c FROM sms_cdr WHERE time >= " + PKT_DAY +
-      " AND client IS NOT NULL AND client<>'' AND LOWER(client)<>'system generated' GROUP BY 1) t " +
+      "(SELECT LOWER(client) AS username, COUNT(*)::int c FROM sms_cdr WHERE time >= " + PKT_DAY + " - interval '" + days + " days' AND client IS NOT NULL AND client<>'' AND LOWER(client)<>'system generated' GROUP BY 1) t " +
       "FULL OUTER JOIN " +
       "(SELECT username, SUM(count)::int c FROM otp_daily WHERE day >= DATE(" + PKT_DAY + ") - $1 AND day < DATE(" + PKT_DAY + ") AND username<>'system generated' GROUP BY 1) p " +
       "ON t.username = p.username ORDER BY 2 DESC LIMIT 50", [days]);
@@ -137,7 +134,7 @@ R.post('/api/leaderboard', A.verify, async (req, res) => {
     }
   }
 
-  // 4c. PREMIUM DATA: daily streaks (otp_daily) + rank movement vs yesterday (today view only)
+  // 4c. Streaks (consecutive active days) + rank movement vs yesterday (today view)
   try {
     const utcToday = new Date().toISOString().slice(0, 10);
     const utcYest = prevDayStr(utcToday);
@@ -177,10 +174,8 @@ R.post('/api/leaderboard', A.verify, async (req, res) => {
     }
   } catch (e) {}
 
-  // 5. User's team (pins-aware)
+  // 5. User's team (pins-aware) + mode
   const userPrefix = resolveLbTeam(String(req.user.username).toLowerCase());
-
-  // 6. Mode: 'team' → Global hidden; 'global' → all tabs; Me always
   const mode = await lbMode();
 
   ok(res, { users, me, range: rg, total: users.length, scope: 'global', teamName: userPrefix, mode, secondary });
