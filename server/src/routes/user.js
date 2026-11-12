@@ -62,6 +62,7 @@ async function lbMode(){
   catch (e) { _lbMode = { ts: Date.now(), v: 'global' }; }
   return _lbMode.v;
 }
+const prevDayStr = d => new Date(new Date(d + 'T00:00:00Z').getTime() - 86400000).toISOString().slice(0, 10);
 
 R.post('/api/leaderboard', A.verify, async (req, res) => {
   const rg = req.body.range || 'today';
@@ -86,8 +87,7 @@ R.post('/api/leaderboard', A.verify, async (req, res) => {
     rows = r.rows;
   }
 
-  // 2. Team prefixes + PINS — SAME rules as Team Report (pin first, then longest prefix).
-  // FIX: pinned users (e.g. UMM_E_Ammarah → Alm_) no longer fall into "System Generated".
+  // 2. Team prefixes + PINS — same rules as Team Report (pin first, then longest prefix)
   const prefRows = await q("SELECT prefix, label FROM team_prefixes ORDER BY LENGTH(prefix) DESC");
   const pinRows = await q("SELECT username, prefix FROM client_team_pins");
   const pm = {}; pinRows.rows.forEach(x => { pm[x.username] = x.prefix; });
@@ -98,7 +98,7 @@ R.post('/api/leaderboard', A.verify, async (req, res) => {
     return '';
   };
 
-  // 3. Build secondary team leaderboard (pins-aware)
+  // 3. Secondary team leaderboard (pins-aware)
   const teamAgg = {};
   rows.forEach(row => {
     const un = String(row.username).toLowerCase();
@@ -121,7 +121,7 @@ R.post('/api/leaderboard', A.verify, async (req, res) => {
     else if (curRank <= 3) achs.push({ id: 'top3', type: 'top3', label: 'Top 3', icon: '🏅', color: 'cyan' });
     const percentile = Math.max(1, Math.round((1 - curRank / Math.max(rows.length, 1)) * 100));
     if (!me && meKeys.some(m => un === m)) {
-      me = { rank: curRank, username: row.username, count: row.count, rankChange: 0, streak: 0, achievements: achs, percentile };
+      me = { rank: curRank, username: row.username, count: row.count, rankChange: 0, prevRank: null, streak: 0, achievements: achs, percentile };
     }
     return { ...row, rank: curRank, prevRank: null, rankChange: 0, streak: 0, achievements: achs, percentile };
   });
@@ -133,14 +133,54 @@ R.post('/api/leaderboard', A.verify, async (req, res) => {
     if (myCount > 0) {
       const rk = await q("SELECT COUNT(*)::int n FROM (SELECT 1 FROM sms_cdr WHERE time >= " + PKT_DAY + " AND client IS NOT NULL AND client<>'' AND LOWER(client)<>'system generated' GROUP BY client HAVING COUNT(*) > $1) x", [myCount]);
       const myRank = rk.rows[0].n + 1;
-      me = { rank: myRank, username: req.user.username, count: myCount, rankChange: 0, streak: 0, achievements: [], percentile: Math.max(1, Math.round((1 - myRank / Math.max(rows.length, myRank, 1)) * 100)) };
+      me = { rank: myRank, username: req.user.username, count: myCount, rankChange: 0, prevRank: null, streak: 0, achievements: [], percentile: Math.max(1, Math.round((1 - myRank / Math.max(rows.length, myRank, 1)) * 100)) };
     }
   }
+
+  // 4c. PREMIUM DATA: daily streaks (otp_daily) + rank movement vs yesterday (today view only)
+  try {
+    const utcToday = new Date().toISOString().slice(0, 10);
+    const utcYest = prevDayStr(utcToday);
+    const names = [...new Set([...rows.slice(0, 10).map(r => String(r.username).toLowerCase()), ...(me ? [String(me.username).toLowerCase()] : [])])];
+    const streakMap = {};
+    if (names.length) {
+      const hist = await q("SELECT username, day::text AS d, count FROM otp_daily WHERE day >= DATE(" + PKT_DAY + ") - 29 AND username = ANY($1)", [names]);
+      const byUser = {};
+      hist.rows.forEach(h => { (byUser[h.username] = byUser[h.username] || {})[String(h.d).slice(0, 10)] = h.count; });
+      names.forEach(n => {
+        const days = byUser[n] || {};
+        const todayCount = rows.find(r => String(r.username).toLowerCase() === n)?.count || 0;
+        let s = 0, cur = todayCount > 0 ? utcToday : utcYest;
+        for (let i = 0; i < 30; i++) {
+          const c = cur === utcToday ? todayCount : (days[cur] || 0);
+          if (c > 0) { s++; cur = prevDayStr(cur); } else break;
+        }
+        streakMap[n] = s;
+      });
+    }
+    let prevRank = {};
+    if (rg === 'today') {
+      const yAll = await q("SELECT username, count FROM otp_daily WHERE day = DATE(" + PKT_DAY + ") - 1 ORDER BY 2 DESC LIMIT 60");
+      yAll.rows.forEach((r, i) => { prevRank[String(r.username).toLowerCase()] = i + 1; });
+    }
+    users.forEach(u => {
+      const n = String(u.username).toLowerCase();
+      u.streak = streakMap[n] || 0;
+      u.prevRank = rg === 'today' ? (prevRank[n] || null) : null;
+      u.rankChange = u.prevRank ? Math.max(-99, Math.min(99, u.prevRank - u.rank)) : 0;
+    });
+    if (me) {
+      const n = String(me.username).toLowerCase();
+      me.streak = streakMap[n] || 0;
+      me.prevRank = rg === 'today' ? (prevRank[n] || null) : null;
+      me.rankChange = me.prevRank ? Math.max(-99, Math.min(99, me.prevRank - me.rank)) : 0;
+    }
+  } catch (e) {}
 
   // 5. User's team (pins-aware)
   const userPrefix = resolveLbTeam(String(req.user.username).toLowerCase());
 
-  // 6. Mode from kv_settings: 'team' → clients see Team+Me only; 'global' → Global+Team+Me
+  // 6. Mode: 'team' → Global hidden; 'global' → all tabs; Me always
   const mode = await lbMode();
 
   ok(res, { users, me, range: rg, total: users.length, scope: 'global', teamName: userPrefix, mode, secondary });
