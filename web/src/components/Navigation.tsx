@@ -24,14 +24,17 @@ export const Navigation: React.FC<NavigationProps> = ({ activeTab, onTabChange, 
             const isActive = activeTab === item.id || (item.id === 'ranges' && activeTab === 'numbers');
             return (
               <button key={item.id} type="button" onClick={() => onTabChange(item.id)}
-                className="relative flex flex-col items-center justify-center gap-1 flex-1 cursor-pointer">
+                className="relative flex flex-col items-center justify-center gap-0.5 flex-1 cursor-pointer">
                 <span className={`relative w-11 h-8 rounded-xl flex items-center justify-center transition-all duration-150 ${
                   isActive ? 'bg-gradient-to-tr from-cyan-500 to-indigo-600 text-white shadow-md shadow-cyan-600/30' : 'text-slate-400 dark:text-slate-500'}`}>
                   <Icon className={`w-4 h-4 ${isActive ? 'stroke-[2.4]' : 'stroke-[1.9]'}`} />
-                  {item.badge !== null && (
-                    <span className="absolute -top-0.5 -right-1 min-w-[14px] h-[14px] px-1 rounded-full bg-rose-500 text-white text-[8px] font-bold flex items-center justify-center border border-white dark:border-slate-900 font-mono shadow-sm">{item.badge}</span>
-                  )}
                 </span>
+                {/* FIX: count pill now sits BELOW the icon (light blue, white digits) instead of the top corner */}
+                {item.badge !== null && (
+                  <span className="px-1.5 py-[1px] rounded-full bg-sky-500 dark:bg-sky-500/90 text-white text-[8px] font-bold font-mono leading-none border border-sky-400/60 shadow-sm shadow-sky-500/40 -mt-0.5">
+                    {item.badge}
+                  </span>
+                )}
                 <span className={`text-[9px] leading-none tracking-tight ${isActive ? 'text-cyan-600 dark:text-cyan-400 font-extrabold' : 'text-slate-400 dark:text-slate-500 font-semibold'}`}>{item.label}</span>
               </button>
             );
@@ -41,3 +44,5 @@ export const Navigation: React.FC<NavigationProps> = ({ activeTab, onTabChange, 
     </nav>
   );
 };
+export default Navigation;
+// === EOF: Navigation.tsx ===
