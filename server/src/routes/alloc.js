@@ -56,58 +56,72 @@ R.post('/api/alloc/daily-used', A.verify, async (req, res) => {
 
 R.post('/api/alloc/allocate', A.verify, async (req, res) => {
   const C = require('../config');
+  const { pool } = require('../db');
   const u = req.user.username, rid = String(req.body.rangeId || ''), rtitle = String(req.body.rangeTitle || ''), ctry = countryOf(rtitle);
   const Lim = await getLimits();
   const qtyReq = parseInt(req.body.quantity || req.body.qty, 10) || 0;
   const payout = parseFloat(req.body.payout) || 0.01;
+  if (!rid) return res.status(400).json({ ok: false, error: 'rangeId required' });
   if (qtyReq < Lim.qty_min || qtyReq > Lim.qty_max) return ok(res, { ok: false, error: 'Quantity must be between ' + Lim.qty_min + ' and ' + Lim.qty_max + ' per allocation (admin limit).' });
 
   const caps = await q("SELECT country, range_id, COALESCE(SUM(qty),0)::int c FROM alloc_events WHERE username=$1 AND created_at >= " + PKT_DAY + " GROUP BY 1,2", [u]);
   let cu = 0, ru = 0; caps.rows.forEach(x => { if (x.country === ctry) cu += x.c; if (x.range_id === rid) ru += x.c; });
-
   if (u.toLowerCase() !== C.SUPER_ADMIN) {
     if (ru + qtyReq > Lim.range_daily) return ok(res, { limitReached: true, capType: 'range', country: ctry, used: ru, limit: Lim.range_daily, remaining: Math.max(0, Lim.range_daily - ru), message: 'Range daily limit ' + Lim.range_daily + ' reached (used ' + ru + ' today).' });
     if (cu + qtyReq > Lim.country_daily) return ok(res, { limitReached: true, capType: 'country', country: ctry, used: cu, limit: Lim.country_daily, remaining: Math.max(0, Lim.country_daily - cu), message: 'Country daily limit ' + Lim.country_daily + ' reached (used ' + cu + ' today).' });
   }
 
-  const { pool } = require('../db');
-  const cl = await pool.connect();
+  // 1) Claim in a millisecond-short transaction. The LaMix call used to run INSIDE
+  //    this transaction, holding row locks + a pool connection for up to 20s.
+  let nums = [];
+  const c1 = await pool.connect();
   try {
-    await cl.query('BEGIN');
-    const lock = await cl.query("SELECT number FROM pool_numbers WHERE range_id=$1 AND status='free' ORDER BY number LIMIT $2 FOR UPDATE SKIP LOCKED", [rid, qtyReq]);
-    if (!lock.rows.length) { await cl.query('ROLLBACK'); return res.status(400).json({ ok: false, error: 'No free numbers left in this range right now.' }); }
-    const nums = lock.rows.map(r => r.number);
+    await c1.query('BEGIN');
+    const lock = await c1.query("SELECT number FROM pool_numbers WHERE range_id=$1 AND status='free' ORDER BY number LIMIT $2 FOR UPDATE SKIP LOCKED", [rid, qtyReq]);
+    nums = lock.rows.map(r => r.number);
+    if (nums.length) await c1.query("UPDATE pool_numbers SET status='reserved', updated_at=NOW() WHERE number = ANY($1)", [nums]);
+    await c1.query('COMMIT');
+  } catch (e) { await c1.query('ROLLBACK').catch(() => {}); throw e; }
+  finally { c1.release(); }
+  if (!nums.length) return res.status(400).json({ ok: false, error: 'No free numbers left in this range right now.' });
 
-    const lr = await lx.post('/numbers/assign', { client: u, numbers: nums, clientPayoutRate: String(payout) }, 'fast');
-    if (lr && (lr._error || lr._rateLimited)) {
-      // LaMix busy → optimistic queue (dock), worker delivers later
-      await cl.query("INSERT INTO alloc_queue (username,client,range_id,range_name,qty,payout_rate,status) VALUES ($1,$2,$3,$4,$5,$6,'pending')", [u, u, rid, rtitle, nums.length, payout]);
-      // FIX (limit bypass): count this booking against daily limits NOW — same as the instant path.
-      // Before this line, queued batches never wrote to alloc_events, so a user could queue
-      // unlimited numbers past the range/country daily caps while LaMix was busy.
-      await cl.query("INSERT INTO alloc_events (username,country,range_id,range_title,qty) VALUES ($1,$2,$3,$4,$5)", [u, ctry, rid, rtitle, nums.length]);
-      await cl.query('COMMIT');
+  // 2) Network call with NO transaction open.
+  const lr = await lx.post('/numbers/assign', { client: u, numbers: nums, clientPayoutRate: String(payout) }, 'fast');
+  const failed = !!(lr && (lr._error || lr._rateLimited));
+
+  // 3) Finalize in a second short transaction. A crash here leaves 'reserved' rows,
+  //    which the queue worker reclaims after 5 minutes and reconcile re-heals.
+  const c2 = await pool.connect();
+  try {
+    await c2.query('BEGIN');
+    if (failed) {
+      await c2.query("UPDATE pool_numbers SET status='free', updated_at=NOW() WHERE number = ANY($1) AND status='reserved'", [nums]);
+      await c2.query("INSERT INTO alloc_queue (username,client,range_id,range_name,qty,payout_rate,status) VALUES ($1,$2,$3,$4,$5,$6,'pending')", [u, u, rid, rtitle, nums.length, payout]);
+      await c2.query("INSERT INTO alloc_events (username,country,range_id,range_title,qty) VALUES ($1,$2,$3,$4,$5)", [u, ctry, rid, rtitle, nums.length]);
+      await c2.query('COMMIT');
       sse.broadcast('numbers');
       return ok(res, { queued: true, allocated: nums.length, country: ctry, message: '⛵ Queued — high demand, delivering in ~1 min.' });
     }
+    await c2.query("UPDATE pool_numbers SET status='assigned', client_id=$1, assigned_at=NOW(), updated_at=NOW() WHERE number = ANY($2)", [u, nums]);
+    await c2.query("INSERT INTO user_numbers (number,client,range_id,range_name,status,updated_at) SELECT n,$1,$2,$3,'active',NOW() FROM UNNEST($4::text[]) n ON CONFLICT (number) DO UPDATE SET client=EXCLUDED.client, status='active', range_name=EXCLUDED.range_name, updated_at=NOW()", [u, rid, rtitle, nums]);
+    await c2.query("INSERT INTO alloc_events (username,country,range_id,range_title,qty) VALUES ($1,$2,$3,$4,$5)", [u, ctry, rid, rtitle, nums.length]);
+    await c2.query("INSERT INTO alloc_queue (username,client,range_id,range_name,qty,payout_rate,status,result,processed_at) VALUES ($1,$2,$3,$4,$5,$6,'done',$7,NOW())", [u, u, rid, rtitle, nums.length, payout, JSON.stringify({ assigned: nums.length, instant: true })]);
+    await c2.query('COMMIT');
+  } catch (e) { await c2.query('ROLLBACK').catch(() => {}); throw e; }
+  finally { c2.release(); }
 
-    await cl.query("UPDATE pool_numbers SET status='assigned', client_id=$1, assigned_at=NOW(), updated_at=NOW() WHERE number = ANY($2)", [u, nums]);
-    await cl.query("INSERT INTO user_numbers (number,client,range_id,range_name,status,updated_at) SELECT n,$1,$2,$3,'active',NOW() FROM UNNEST($4::text[]) n ON CONFLICT (number) DO UPDATE SET client=EXCLUDED.client, status='active', range_name=EXCLUDED.range_name, updated_at=NOW()", [u, rid, rtitle, nums]);
-    await cl.query("INSERT INTO alloc_events (username,country,range_id,range_title,qty) VALUES ($1,$2,$3,$4,$5)", [u, ctry, rid, rtitle, nums.length]);
-    // FIX: record instant dispatch in the dock too (was missing before)
-    await cl.query("INSERT INTO alloc_queue (username,client,range_id,range_name,qty,payout_rate,status,result,processed_at) VALUES ($1,$2,$3,$4,$5,$6,'done',$7,NOW())", [u, u, rid, rtitle, nums.length, payout, JSON.stringify({ assigned: nums.length, instant: true })]);
-    await cl.query('COMMIT');
-    L.invalidateNc(); sse.broadcast('numbers'); sse.broadcast('ranges');
-    ok(res, { instant: true, allocated: nums.length, country: ctry, used: cu + nums.length, limit: Lim.country_daily, remaining: Math.max(0, Lim.country_daily - (cu + nums.length)), message: 'Delivered instantly.' });
-  } catch (e) { await cl.query('ROLLBACK'); res.status(500).json({ ok: false, error: e.message }); }
-  finally { cl.release(); }
+  L.invalidateNc(); sse.broadcast('numbers'); sse.broadcast('ranges');
+  ok(res, { instant: true, allocated: nums.length, country: ctry, used: cu + nums.length, limit: Lim.country_daily, remaining: Math.max(0, Lim.country_daily - (cu + nums.length)), message: 'Delivered instantly.' });
 });
 
+// Strictly scoped to ONE range. The old NULL/empty-range fallback clause
+// released every unlabelled row the user owned, across all ranges, in a single click.
 R.post('/api/range/unassign', A.verify, async (req, res) => {
   const u = req.user.username, alt = req.user.clientName || u, rid = String(req.body.rangeId || '');
-  const rows = (await q("SELECT number FROM user_numbers WHERE status='active' AND (LOWER(client)=LOWER($1) OR LOWER(client)=LOWER($2)) AND (range_id=$3 OR range_id IS NULL OR range_id='')", [u, alt, rid])).rows;
+  if (!rid) return res.status(400).json({ ok: false, error: 'rangeId required' });
+  const rows = (await q("SELECT number FROM user_numbers WHERE status='active' AND range_id=$3 AND (LOWER(client)=LOWER($1) OR LOWER(client)=LOWER($2))", [u, alt, rid])).rows;
   const nums = rows.map(r => r.number);
-  if (!nums.length) return ok(res, { removed: 0, message: 'No numbers found to unassign' });
+  if (!nums.length) return ok(res, { removed: 0, message: 'No numbers found in this range' });
   for (let i = 0; i < nums.length; i += 1000) {
     const lr = await lx.post('/numbers/unassign', { numbers: nums.slice(i, i + 1000) }, 'fast');
     if (lr && (lr._error || lr._rateLimited)) return res.status(500).json({ ok: false, error: 'LaMix unassign failed — retry in a moment.' });
@@ -118,8 +132,8 @@ R.post('/api/range/unassign', A.verify, async (req, res) => {
   ok(res, { removed: nums.length, message: 'Unassigned ' + nums.length + ' numbers' });
 });
 
-// ── Shipping Dock list: today only (auto-zero at 00:00 UTC / 5:00 AM PKT), latest 50 ──
-// super/admin/moderator → ALL users · normal user → own batches only
+// ── Shipping Dock list: today only (00:00 UTC / 5:00 AM PKT), latest 50 ──
+
 R.post('/api/alloc/queue-list', A.verify, async (req, res) => {
   const un = String(req.user.username || '').toLowerCase();
   const isAdmin = A.isAdminish(await A.getRole(un));
