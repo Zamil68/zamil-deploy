@@ -2,6 +2,7 @@
 const { q, PKT_DAY, pool } = require('./db');
 const lx = require('./lamix');
 const sse = require('./sse');
+const CT = require('./counters'); // __ZAMIL_COUNTERS_V1__
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const normT = s => {
   let v = String(s == null ? '' : s).trim();
@@ -285,10 +286,13 @@ async function dailyTruncationLoop(){
           await cl.query('BEGIN');
           await cl.query("SET LOCAL statement_timeout='10min'");
           await cl.query("INSERT INTO otp_daily (username, day, count) SELECT LOWER(client), date_trunc('day', time)::date, COUNT(*)::int FROM sms_cdr WHERE time < $1 AND client IS NOT NULL AND client <> '' GROUP BY 1, 2 ON CONFLICT (username, day) DO UPDATE SET count = otp_daily.count + EXCLUDED.count", [B]);
-          await cl.query("INSERT INTO otp_number_daily (number, day, client, count) SELECT number, date_trunc('day', time)::date, MAX(LOWER(client)), COUNT(*)::int FROM sms_cdr WHERE time < $1 AND number <> '' GROUP BY 1,2 ON CONFLICT (number, day) DO UPDATE SET count = otp_number_daily.count + EXCLUDED.count, client = COALESCE(EXCLUDED.client, otp_number_daily.client)", [B]);
+          await cl.query("SAVEPOINT numroll");
+          try { await cl.query("INSERT INTO otp_number_daily (number, day, client, count) SELECT number, date_trunc('day', time)::date, MAX(LOWER(client)), COUNT(*)::int FROM sms_cdr WHERE time < $1 AND number <> '' GROUP BY 1,2 ON CONFLICT (number, day) DO UPDATE SET count = otp_number_daily.count + EXCLUDED.count, client = COALESCE(EXCLUDED.client, otp_number_daily.client)", [B]); }
+          catch (e) { await cl.query("ROLLBACK TO SAVEPOINT numroll"); console.error("[retention] per-number rollup skipped:", e.message); }
           const del = await cl.query("DELETE FROM sms_cdr WHERE time < $1", [B]);
           await cl.query('COMMIT');
           console.log('[retention] rolled up + purged', del.rowCount, 'raw CDR rows');
+        CT.refreshCounters(true);
         } finally { cl.release(); }
       }
     } catch (e) { console.error('[retention]', e.message); }
