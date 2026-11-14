@@ -26,7 +26,7 @@ export const InboxView: React.FC<InboxViewProps> = ({ messages, todayCount, week
   const filtered = useMemo(() => {
     const s = q.toLowerCase().trim();
     if (!s) return sorted;
-    return sorted.filter((m) => m.message.toLowerCase().includes(s) || m.cli.toLowerCase().includes(s) || m.number.includes(s) || (m.range && m.range.toLowerCase().includes(s)));
+    return sorted.filter((m) => String(m.message || '').toLowerCase().includes(s) || String(m.cli || '').toLowerCase().includes(s) || String(m.number || '').includes(s) || String(m.range || '').toLowerCase().includes(s));
   }, [sorted, q]);
   const visible = useMemo(() => (limit === '0' ? filtered : filtered.slice(0, parseInt(limit, 10))), [filtered, limit]);
   return (
