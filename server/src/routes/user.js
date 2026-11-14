@@ -46,15 +46,26 @@ R.post('/api/smscount-range', A.verify, async (req, res) => {
   ok(res, { count: r.rows[0].t, byNumber: {}, byRange: {} });
 });
 
+// Ownership enforced: a number must be in MY ledger or MY pool assignment.
+// The old LIKE '%'||n suffix match let any account read any other client's SMS.
 R.post('/api/number-smscount', A.verify, async (req, res) => {
   const n = String(req.body.number || '').replace(/[^0-9]/g, '');
   if (!n) return ok(res, { number: n, count: 0, recent: [] });
-  const c = await q("SELECT COUNT(*)::int t FROM sms_cdr WHERE time >= " + PKT_DAY + " AND (number=$1 OR number LIKE '%'||$1 OR number LIKE $1||'%')", [n]);
-  const r = await q("SELECT to_char(time AT TIME ZONE 'UTC','HH24:MI:SS') AS time, cli, content AS message, number FROM sms_cdr WHERE time >= " + PKT_DAY + " AND (number=$1 OR number LIKE '%'||$1 OR number LIKE $1||'%') ORDER BY time DESC LIMIT 8", [n]);
+  const u = req.user, alt = u.clientName || u.username;
+  const own = await q(
+    "SELECT number FROM user_numbers WHERE number=$1 AND (LOWER(client)=LOWER($2) OR LOWER(client)=LOWER($3)) " +
+    "UNION SELECT number FROM pool_numbers WHERE number=$1 AND status='assigned' AND (LOWER(client_id)=LOWER($2) OR LOWER(client_id)=LOWER($3)) LIMIT 1",
+    [n, u.username, alt]);
+  if (!own.rows[0] && !A.isAdminish(await A.getRole(u.username))) {
+    return res.status(403).json({ ok: false, error: 'This number is not assigned to you.' });
+  }
+  const c = await q("SELECT COUNT(*)::int t FROM sms_cdr WHERE time >= " + PKT_DAY + " AND number=$1", [n]);
+  const r = await q("SELECT to_char(time AT TIME ZONE 'UTC','HH24:MI:SS') AS time, cli, content AS message, number FROM sms_cdr WHERE time >= " + PKT_DAY + " AND number=$1 ORDER BY time DESC LIMIT 8", [n]);
   ok(res, { number: n, count: c.rows[0].t, recent: r.rows });
 });
 
 // ── Leaderboard mode (kv_settings.leaderboard_mode), cached 30s ──
+
 let _lbMode = { ts: 0, v: 'global' };
 async function lbMode(){
   if (Date.now() - _lbMode.ts < 30000) return _lbMode.v;
@@ -66,12 +77,24 @@ const prevDayStr = d => new Date(new Date(d + 'T00:00:00Z').getTime() - 86400000
 
 R.post('/api/leaderboard', A.verify, async (req, res) => {
   const rg = req.body.range || 'today';
+  const mode = await lbMode();
+
+  const prefRows = await q("SELECT prefix, label FROM team_prefixes ORDER BY LENGTH(prefix) DESC");
+  const pinRows = await q("SELECT username, prefix FROM client_team_pins");
+  const pm = {}; pinRows.rows.forEach(x => { pm[String(x.username).toLowerCase()] = x.prefix; });
+  const resolveLbTeam = (un) => {
+    const pin = pm[un];
+    if (pin && prefRows.rows.some(p => p.prefix === pin)) return pin;
+    for (const p of prefRows.rows) if (p.prefix && un.startsWith(p.prefix.toLowerCase())) return p.prefix;
+    return '';
+  };
+  const meKeys = [req.user.clientName, req.user.username].map(x => String(x || '').toLowerCase()).filter(Boolean);
+  const myTeam = resolveLbTeam(String(req.user.username).toLowerCase()) || meKeys.map(resolveLbTeam).find(Boolean) || '';
+  const teamLabel = t => t === 'SYS' ? 'System Generated' : (prefRows.rows.find(p => p.prefix === t)?.label || t);
+
   let rows = [];
-  // 1. Data — today = raw only; week/month = RAW inside window + otp_daily rolled days
   if (rg === 'today') {
-    const r = await q(
-      "SELECT client AS username, COUNT(*)::int AS count FROM sms_cdr WHERE time >= " + PKT_DAY +
-      " AND client IS NOT NULL AND client<>'' AND LOWER(client)<>'system generated' GROUP BY 1 ORDER BY 2 DESC LIMIT 50");
+    const r = await q("SELECT LOWER(client) AS username, COUNT(*)::int AS count FROM sms_cdr WHERE time >= " + PKT_DAY + " AND client IS NOT NULL AND client<>'' AND LOWER(client)<>'system generated' GROUP BY 1 ORDER BY 2 DESC LIMIT 300");
     rows = r.rows;
   } else {
     const days = rg === 'week' ? 6 : 29;
@@ -80,65 +103,56 @@ R.post('/api/leaderboard', A.verify, async (req, res) => {
       "(SELECT LOWER(client) AS username, COUNT(*)::int c FROM sms_cdr WHERE time >= " + PKT_DAY + " - interval '" + days + " days' AND client IS NOT NULL AND client<>'' AND LOWER(client)<>'system generated' GROUP BY 1) t " +
       "FULL OUTER JOIN " +
       "(SELECT username, SUM(count)::int c FROM otp_daily WHERE day >= DATE(" + PKT_DAY + ") - $1 AND day < DATE(" + PKT_DAY + ") AND username<>'system generated' GROUP BY 1) p " +
-      "ON t.username = p.username ORDER BY 2 DESC LIMIT 50", [days]);
+      "ON t.username = p.username ORDER BY 2 DESC LIMIT 300", [days]);
     rows = r.rows;
   }
 
-  // 2. Team prefixes + PINS — same rules as Team Report (pin first, then longest prefix)
-  const prefRows = await q("SELECT prefix, label FROM team_prefixes ORDER BY LENGTH(prefix) DESC");
-  const pinRows = await q("SELECT username, prefix FROM client_team_pins");
-  const pm = {}; pinRows.rows.forEach(x => { pm[x.username] = x.prefix; });
-  const resolveLbTeam = (un) => {
-    const pin = pm[un];
-    if (pin && prefRows.rows.some(p => p.prefix === pin)) return pin;
-    for (const p of prefRows.rows) if (p.prefix && un.startsWith(p.prefix.toLowerCase())) return p.prefix;
-    return '';
-  };
+  // Team-isolated mode is enforced HERE. Hiding the tab client-side leaked every
+  // operator's username + OTP volume to every team.
+  const scoped = mode === 'team'
+    ? rows.filter(r => (resolveLbTeam(String(r.username).toLowerCase()) || 'SYS') === (myTeam || 'SYS'))
+    : rows;
+  const top = scoped.slice(0, 50);
 
-  // 3. Secondary team leaderboard (pins-aware)
   const teamAgg = {};
-  rows.forEach(row => {
-    const un = String(row.username).toLowerCase();
-    const tk = resolveLbTeam(un) || 'SYS';
-    const tl = tk === 'SYS' ? 'System Generated' : (prefRows.rows.find(p => p.prefix === tk)?.label || tk);
-    if (!teamAgg[tk]) teamAgg[tk] = { team: tk, label: tl, count: 0, top: null };
+  scoped.forEach(row => {
+    const tk = resolveLbTeam(String(row.username).toLowerCase()) || 'SYS';
+    if (!teamAgg[tk]) teamAgg[tk] = { team: tk, label: teamLabel(tk), count: 0, top: null };
     teamAgg[tk].count += Number(row.count) || 0;
     if (!teamAgg[tk].top || row.count > teamAgg[tk].top.count) teamAgg[tk].top = { username: row.username, count: Number(row.count) };
   });
   const secondary = Object.values(teamAgg).sort((a, b) => b.count - a.count).slice(0, 10);
 
-  // 4. Current user's rank (exact match only)
-  const meKeys = [req.user.clientName, req.user.username].map(x => String(x || '').toLowerCase()).filter(Boolean);
   let me = null;
-  const users = rows.map((row, i) => {
+  const users = top.map((row, i) => {
     const un = String(row.username).toLowerCase();
     const curRank = i + 1;
     const achs = [];
     if (curRank === 1) achs.push({ id: 'champ', type: 'champion', label: 'Champion', icon: '👑', color: 'yellow' });
     else if (curRank <= 3) achs.push({ id: 'top3', type: 'top3', label: 'Top 3', icon: '🏅', color: 'cyan' });
-    const percentile = Math.max(1, Math.round((1 - curRank / Math.max(rows.length, 1)) * 100));
-    if (!me && meKeys.some(m => un === m)) {
-      me = { rank: curRank, username: row.username, count: row.count, rankChange: 0, prevRank: null, streak: 0, achievements: achs, percentile };
-    }
+    const percentile = Math.max(1, Math.round((1 - curRank / Math.max(top.length, 1)) * 100));
+    if (!me && meKeys.some(m => un === m)) me = { rank: curRank, username: row.username, count: row.count, rankChange: 0, prevRank: null, streak: 0, achievements: achs, percentile };
     return { ...row, rank: curRank, prevRank: null, rankChange: 0, streak: 0, achievements: achs, percentile };
   });
 
-  // 4b. Outside Top 50 → own count + real rank (today)
   if (!me && rg === 'today') {
     const mc = await q("SELECT COUNT(*)::int c FROM sms_cdr WHERE time >= " + PKT_DAY + " AND (LOWER(client)=LOWER($1) OR LOWER(client)=LOWER($2))", [req.user.username, req.user.clientName || req.user.username]);
     const myCount = mc.rows[0].c;
     if (myCount > 0) {
-      const rk = await q("SELECT COUNT(*)::int n FROM (SELECT 1 FROM sms_cdr WHERE time >= " + PKT_DAY + " AND client IS NOT NULL AND client<>'' AND LOWER(client)<>'system generated' GROUP BY client HAVING COUNT(*) > $1) x", [myCount]);
-      const myRank = rk.rows[0].n + 1;
-      me = { rank: myRank, username: req.user.username, count: myCount, rankChange: 0, prevRank: null, streak: 0, achievements: [], percentile: Math.max(1, Math.round((1 - myRank / Math.max(rows.length, myRank, 1)) * 100)) };
+      let myRank;
+      if (mode === 'team') myRank = scoped.filter(r => r.count > myCount).length + 1;
+      else {
+        const rk = await q("SELECT COUNT(*)::int n FROM (SELECT 1 FROM sms_cdr WHERE time >= " + PKT_DAY + " AND client IS NOT NULL AND client<>'' AND LOWER(client)<>'system generated' GROUP BY client HAVING COUNT(*) > $1) x", [myCount]);
+        myRank = rk.rows[0].n + 1;
+      }
+      me = { rank: myRank, username: req.user.username, count: myCount, rankChange: 0, prevRank: null, streak: 0, achievements: [], percentile: Math.max(1, Math.round((1 - myRank / Math.max(top.length, myRank, 1)) * 100)) };
     }
   }
 
-  // 4c. Streaks (consecutive active days) + rank movement vs yesterday (today view)
   try {
     const utcToday = new Date().toISOString().slice(0, 10);
     const utcYest = prevDayStr(utcToday);
-    const names = [...new Set([...rows.slice(0, 10).map(r => String(r.username).toLowerCase()), ...(me ? [String(me.username).toLowerCase()] : [])])];
+    const names = [...new Set([...top.slice(0, 10).map(r => String(r.username).toLowerCase()), ...(me ? [String(me.username).toLowerCase()] : [])])];
     const streakMap = {};
     if (names.length) {
       const hist = await q("SELECT username, day::text AS d, count FROM otp_daily WHERE day >= DATE(" + PKT_DAY + ") - 29 AND username = ANY($1)", [names]);
@@ -146,12 +160,9 @@ R.post('/api/leaderboard', A.verify, async (req, res) => {
       hist.rows.forEach(h => { (byUser[h.username] = byUser[h.username] || {})[String(h.d).slice(0, 10)] = h.count; });
       names.forEach(n => {
         const days = byUser[n] || {};
-        const todayCount = rows.find(r => String(r.username).toLowerCase() === n)?.count || 0;
+        const todayCount = top.find(r => String(r.username).toLowerCase() === n)?.count || 0;
         let s = 0, cur = todayCount > 0 ? utcToday : utcYest;
-        for (let i = 0; i < 30; i++) {
-          const c = cur === utcToday ? todayCount : (days[cur] || 0);
-          if (c > 0) { s++; cur = prevDayStr(cur); } else break;
-        }
+        for (let i = 0; i < 30; i++) { const c = cur === utcToday ? todayCount : (days[cur] || 0); if (c > 0) { s++; cur = prevDayStr(cur); } else break; }
         streakMap[n] = s;
       });
     }
@@ -160,37 +171,43 @@ R.post('/api/leaderboard', A.verify, async (req, res) => {
       const yAll = await q("SELECT username, count FROM otp_daily WHERE day = DATE(" + PKT_DAY + ") - 1 ORDER BY 2 DESC LIMIT 60");
       yAll.rows.forEach((r, i) => { prevRank[String(r.username).toLowerCase()] = i + 1; });
     }
-    users.forEach(u => {
-      const n = String(u.username).toLowerCase();
-      u.streak = streakMap[n] || 0;
-      u.prevRank = rg === 'today' ? (prevRank[n] || null) : null;
-      u.rankChange = u.prevRank ? Math.max(-99, Math.min(99, u.prevRank - u.rank)) : 0;
-    });
-    if (me) {
-      const n = String(me.username).toLowerCase();
-      me.streak = streakMap[n] || 0;
-      me.prevRank = rg === 'today' ? (prevRank[n] || null) : null;
-      me.rankChange = me.prevRank ? Math.max(-99, Math.min(99, me.prevRank - me.rank)) : 0;
-    }
+    const apply = o => {
+      const n = String(o.username).toLowerCase();
+      o.streak = streakMap[n] || 0;
+      o.prevRank = rg === 'today' ? (prevRank[n] || null) : null;
+      o.rankChange = o.prevRank ? Math.max(-99, Math.min(99, o.prevRank - o.rank)) : 0;
+    };
+    users.forEach(apply);
+    if (me) apply(me);
   } catch (e) {}
 
-  // 5. User's team (pins-aware) + mode
-  const userPrefix = resolveLbTeam(String(req.user.username).toLowerCase());
-  const mode = await lbMode();
-
-  ok(res, { users, me, range: rg, total: users.length, scope: 'global', teamName: userPrefix, mode, secondary });
+  ok(res, { users, me, range: rg, total: users.length, scope: mode === 'team' ? 'team' : 'global', teamName: myTeam, mode, secondary });
 });
 
 R.post('/api/numbers/mark-used', A.verify, async (req, res) => {
   const number = String(req.body.number || '').replace(/[^0-9+]/g, '');
   if (!number) return res.status(400).json({ ok: false, error: 'number required' });
-  let rid = String(req.body.rangeId || ''), rname = String(req.body.rangeTitle || '');
-  if (!rname) { const nr = await q("SELECT range_id, range_name FROM user_numbers WHERE number=$1 AND client=$2 LIMIT 1", [number, req.user.username]); if (nr.rows[0]) { rid = nr.rows[0].range_id || rid; rname = nr.rows[0].range_name || rname; } }
+  const me = req.user.username, alt = req.user.clientName || me;
+  const own = await q("SELECT range_id, range_name FROM user_numbers WHERE number=$1 AND (LOWER(client)=LOWER($2) OR LOWER(client)=LOWER($3)) LIMIT 1", [number, me, alt]);
+  if (!own.rows[0]) return res.status(403).json({ ok: false, error: 'This number is not assigned to you.' });
+  const rid = own.rows[0].range_id || String(req.body.rangeId || '');
+  const rname = own.rows[0].range_name || String(req.body.rangeTitle || '');
   await q("INSERT INTO number_usage (number,client,range_id,range_name,used_by,source) VALUES ($1,$2,$3,$4,$5,'copy') ON CONFLICT (number,client) DO NOTHING",
-    [number, req.user.username, rid, rname, req.user.username]);
+    [number, me, rid, rname, me]);
   ok(res, { marked: true });
 });
 
+R.post('/api/numbers/mark-used-bulk', A.verify, async (req, res) => {
+  const raw = Array.isArray(req.body.numbers) ? req.body.numbers : [];
+  const nums = [...new Set(raw.map(x => String(x || '').replace(/[^0-9+]/g, '')).filter(Boolean))].slice(0, 2000);
+  if (!nums.length) return ok(res, { marked: 0 });
+  const me = req.user.username, alt = req.user.clientName || me;
+  const own = await q("SELECT number, range_id, range_name FROM user_numbers WHERE number = ANY($1) AND status='active' AND (LOWER(client)=LOWER($2) OR LOWER(client)=LOWER($3))", [nums, me, alt]);
+  if (!own.rows.length) return ok(res, { marked: 0 });
+  const payload = own.rows.map(x => ({ n: x.number, c: me, rid: x.range_id || null, rn: x.range_name || null, ub: me, src: 'copy' }));
+  const ins = await q("INSERT INTO number_usage (number,client,range_id,range_name,used_by,source) SELECT v.n,v.c,v.rid,v.rn,v.ub,v.src FROM json_to_recordset($1) AS v(n text,c text,rid text,rn text,ub text,src text) ON CONFLICT (number,client) DO NOTHING", [JSON.stringify(payload)]);
+  ok(res, { marked: ins.rowCount, requested: nums.length });
+});
 R.post('/api/numbers/used-list', A.verify, async (req, res) => {
   const r = await q("SELECT number FROM number_usage WHERE client=$1 LIMIT 20000", [req.user.username]);
   ok(res, { used: r.rows.map(x => x.number) });
