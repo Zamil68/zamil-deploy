@@ -236,7 +236,7 @@ export const LeaderboardView: React.FC<Props> = ({ data, activeRange, onChangeRa
   const max = p1 ? Math.max(p1.count, 1) : 1;
   const meIn = users.slice(0, 10).some((u) => u.username === data.me?.username);
   const s = q.toLowerCase().trim();
-  const list = s ? rest.filter((u) => u.username.toLowerCase().includes(s)) : rest;
+  const list = s ? users.slice(0, 10).filter((u) => u.username.toLowerCase().includes(s) || prettyUser(u.username).toLowerCase().includes(s)) : rest;
   const tabBtn = (id: 'global' | 'team' | 'me', icon: any, label: string) => {
     const Ic = icon;
     const on = tab === id;
@@ -327,7 +327,7 @@ export const LeaderboardView: React.FC<Props> = ({ data, activeRange, onChangeRa
         {users.length === 0 ? <Empty icon={Trophy} text="No rankings yet" /> : (
           <Card className="divide-y divide-slate-100 dark:divide-slate-800 overflow-hidden">
             {list.map((u, i) => {
-              const rank = i + 4;
+              const rank = u.rank ?? (users.indexOf(u) + 1);
               return (
                 <div key={u.username} className="px-3 py-2.5 flex items-center gap-2.5 hover:bg-cyan-500/5 dark:hover:bg-cyan-300/5 transition-colors">
                   <span className="w-7 h-7 rounded-full flex items-center justify-center font-mono text-[10px] font-black shrink-0 bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border border-cyan-500/20">{rank}</span>
