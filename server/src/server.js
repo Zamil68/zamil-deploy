@@ -1,14 +1,16 @@
 // ZAMIL v3 — single monolith: API + daemons + SSE + static (classic + new UI).
+process.env.TZ = process.env.TZ || 'UTC';   // pg parses naive timestamps in local TZ → keep math deterministic
 const path = require('path');
 const express = require('express');
+require('./safe').install();                // MUST run before any route file is required
 const C = require('./config');
 const { pool } = require('./db');
 const sse = require('./sse');
 const loops = require('./loops');
-
 const app = express();
+app.disable('x-powered-by');
 app.use(express.json({ limit: '2mb' }));
-app.use((req, res, next) => { res.set('Access-Control-Allow-Origin', C.CORS_ORIGIN || '*'); next(); });
+app.use((req, res, next) => { res.set('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*'); next(); });
 
 // ── API routes ──
 app.use(require('./routes/public'));
@@ -31,12 +33,22 @@ app.use((q, s, n) => {
   s.status(404).send('Not found');
 });
 
-const server = app.listen(C.PORT, C.HOST, () => console.log('🚀 ZAMIL v3 on ' + C.HOST + ':' + C.PORT));
-if (C.DAEMONS) { loops.start(); require("./loops").dailyTruncationLoop(); }
+// ── last resort: thrown / rejected handlers land here instead of hanging ──
+app.use((err, req, res, next) => {
+  console.error('[api-error]', req.method, req.originalUrl, (err && err.message) || err);
+  if (res.headersSent) return next(err);
+  if (String(req.originalUrl || '').startsWith('/api')) return res.status(500).json({ ok: false, error: 'Server error — please retry' });
+  res.status(500).send('Server error');
+});
 
-// ── Graceful shutdown (PM2 kill_timeout 10s) ──
-function shutdown(sig){
+const server = app.listen(C.PORT, C.HOST, () => console.log('🚀 ZAMIL v3 on ' + C.HOST + ':' + C.PORT));
+if (C.DAEMONS) { loops.start(); loops.dailyTruncationLoop(); }
+
+// ── Graceful shutdown: close SSE first, otherwise server.close() never returns ──
+function shutdown(sig) {
   console.log('[shutdown] ' + sig + ' — draining…');
+  try { sse.closeAll(); } catch (e) {}
+  try { server.closeIdleConnections && server.closeIdleConnections(); } catch (e) {}
   server.close(() => { pool.end(() => process.exit(0)); });
   setTimeout(() => process.exit(1), 9000);
 }
