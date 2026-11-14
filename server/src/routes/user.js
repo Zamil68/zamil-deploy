@@ -1,6 +1,7 @@
 const R = require('express').Router();
 const { q, PKT_DAY } = require('../db');
 const A = require('../auth');
+const CT = require('../counters'); // __ZAMIL_COUNTERS_V1__
 const sse = require('../sse');
 const L = require('../loops');
 const ok = (res, d = {}) => res.json({ ok: true, ...d });
@@ -32,22 +33,18 @@ R.post('/api/smscount', A.verify, async (req, res) => {
 
 // FIX (Week/Month missing yesterday): count RAW rows inside the whole window (today + any
 // day not rolled into otp_daily yet) PLUS rolled-up days. No missing days, no double count.
+// Week/Month come straight from otp_counters (Tue→Mon / 4-week windows, reset at 00:00 UTC).
 R.post('/api/smscount-range', A.verify, async (req, res) => {
   const u = req.user, alt = u.clientName || u.username, rg = req.body.range;
-  if (rg !== 'week' && rg !== 'month') {
-    const c = await q("SELECT COUNT(*)::int t FROM sms_cdr WHERE time >= " + PKT_DAY + " AND (LOWER(client)=LOWER($1) OR LOWER(client)=LOWER($2))", [u.username, alt]);
-    return ok(res, { count: c.rows[0].t, byNumber: {}, byRange: {} });
-  }
-  const days = rg === 'week' ? 6 : 29;
-  const r = await q(
-    "SELECT (SELECT COUNT(*)::int FROM sms_cdr WHERE time >= " + PKT_DAY + " - interval '" + days + " days' AND (LOWER(client)=LOWER($1) OR LOWER(client)=LOWER($2))) + " +
-    "(SELECT COALESCE(SUM(count),0)::int FROM otp_daily WHERE day >= DATE(" + PKT_DAY + ") - $3 AND day < DATE(" + PKT_DAY + ") AND username IN (LOWER($1), LOWER($2))) AS t",
-    [u.username, alt, days]);
-  ok(res, { count: r.rows[0].t, byNumber: {}, byRange: {} });
+  await CT.refreshCounters();
+  const r = await q("SELECT COALESCE(SUM(otp_today),0)::int t, COALESCE(SUM(otp_week),0)::int w, COALESCE(SUM(otp_month),0)::int m FROM otp_counters WHERE username IN (LOWER($1), LOWER($2))", [u.username, alt]);
+  const row = r.rows[0] || { t: 0, w: 0, m: 0 };
+  const count = rg === 'week' ? row.w : rg === 'month' ? row.m : row.t;
+  ok(res, { count, today: row.t, week: row.w, month: row.m, byNumber: {}, byRange: {} });
 });
 
 // Ownership enforced: a number must be in MY ledger or MY pool assignment.
-// The old LIKE '%'||n suffix match let any account read any other client's SMS.
+
 R.post('/api/number-smscount', A.verify, async (req, res) => {
   const n = String(req.body.number || '').replace(/[^0-9]/g, '');
   if (!n) return ok(res, { number: n, count: 0, recent: [] });
@@ -76,8 +73,10 @@ async function lbMode(){
 const prevDayStr = d => new Date(new Date(d + 'T00:00:00Z').getTime() - 86400000).toISOString().slice(0, 10);
 
 R.post('/api/leaderboard', A.verify, async (req, res) => {
-  const rg = req.body.range || 'today';
+  const rg = req.body.range === 'week' ? 'week' : req.body.range === 'month' ? 'month' : 'today';
+  const col = rg === 'week' ? 'otp_week' : rg === 'month' ? 'otp_month' : 'otp_today';
   const mode = await lbMode();
+  await CT.refreshCounters();
 
   const prefRows = await q("SELECT prefix, label FROM team_prefixes ORDER BY LENGTH(prefix) DESC");
   const pinRows = await q("SELECT username, prefix FROM client_team_pins");
@@ -92,25 +91,12 @@ R.post('/api/leaderboard', A.verify, async (req, res) => {
   const myTeam = resolveLbTeam(String(req.user.username).toLowerCase()) || meKeys.map(resolveLbTeam).find(Boolean) || '';
   const teamLabel = t => t === 'SYS' ? 'System Generated' : (prefRows.rows.find(p => p.prefix === t)?.label || t);
 
-  let rows = [];
-  if (rg === 'today') {
-    const r = await q("SELECT LOWER(client) AS username, COUNT(*)::int AS count FROM sms_cdr WHERE time >= " + PKT_DAY + " AND client IS NOT NULL AND client<>'' AND LOWER(client)<>'system generated' GROUP BY 1 ORDER BY 2 DESC LIMIT 300");
-    rows = r.rows;
-  } else {
-    const days = rg === 'week' ? 6 : 29;
-    const r = await q(
-      "SELECT COALESCE(t.username, p.username) AS username, (COALESCE(t.c,0) + COALESCE(p.c,0))::int AS count FROM " +
-      "(SELECT LOWER(client) AS username, COUNT(*)::int c FROM sms_cdr WHERE time >= " + PKT_DAY + " - interval '" + days + " days' AND client IS NOT NULL AND client<>'' AND LOWER(client)<>'system generated' GROUP BY 1) t " +
-      "FULL OUTER JOIN " +
-      "(SELECT username, SUM(count)::int c FROM otp_daily WHERE day >= DATE(" + PKT_DAY + ") - $1 AND day < DATE(" + PKT_DAY + ") AND username<>'system generated' GROUP BY 1) p " +
-      "ON t.username = p.username ORDER BY 2 DESC LIMIT 300", [days]);
-    rows = r.rows;
-  }
+  const r = await q("SELECT username, " + col + " AS count FROM otp_counters WHERE " + col + " > 0 ORDER BY 2 DESC, 1 ASC LIMIT 300");
+  const rows = r.rows;
 
-  // Team-isolated mode is enforced HERE. Hiding the tab client-side leaked every
-  // operator's username + OTP volume to every team.
+  // team isolation enforced server-side
   const scoped = mode === 'team'
-    ? rows.filter(r => (resolveLbTeam(String(r.username).toLowerCase()) || 'SYS') === (myTeam || 'SYS'))
+    ? rows.filter(x => (resolveLbTeam(String(x.username).toLowerCase()) || 'SYS') === (myTeam || 'SYS'))
     : rows;
   const top = scoped.slice(0, 50);
 
@@ -135,14 +121,14 @@ R.post('/api/leaderboard', A.verify, async (req, res) => {
     return { ...row, rank: curRank, prevRank: null, rankChange: 0, streak: 0, achievements: achs, percentile };
   });
 
-  if (!me && rg === 'today') {
-    const mc = await q("SELECT COUNT(*)::int c FROM sms_cdr WHERE time >= " + PKT_DAY + " AND (LOWER(client)=LOWER($1) OR LOWER(client)=LOWER($2))", [req.user.username, req.user.clientName || req.user.username]);
+  if (!me) {
+    const mc = await q("SELECT COALESCE(SUM(" + col + "),0)::int c FROM otp_counters WHERE username IN (" + meKeys.map((_, i) => 'LOWER($' + (i + 1) + ')').join(',') + ")", meKeys);
     const myCount = mc.rows[0].c;
     if (myCount > 0) {
       let myRank;
-      if (mode === 'team') myRank = scoped.filter(r => r.count > myCount).length + 1;
+      if (mode === 'team') myRank = scoped.filter(x => x.count > myCount).length + 1;
       else {
-        const rk = await q("SELECT COUNT(*)::int n FROM (SELECT 1 FROM sms_cdr WHERE time >= " + PKT_DAY + " AND client IS NOT NULL AND client<>'' AND LOWER(client)<>'system generated' GROUP BY client HAVING COUNT(*) > $1) x", [myCount]);
+        const rk = await q("SELECT COUNT(*)::int n FROM otp_counters WHERE " + col + " > $1", [myCount]);
         myRank = rk.rows[0].n + 1;
       }
       me = { rank: myRank, username: req.user.username, count: myCount, rankChange: 0, prevRank: null, streak: 0, achievements: [], percentile: Math.max(1, Math.round((1 - myRank / Math.max(top.length, myRank, 1)) * 100)) };
@@ -152,15 +138,17 @@ R.post('/api/leaderboard', A.verify, async (req, res) => {
   try {
     const utcToday = new Date().toISOString().slice(0, 10);
     const utcYest = prevDayStr(utcToday);
-    const names = [...new Set([...top.slice(0, 10).map(r => String(r.username).toLowerCase()), ...(me ? [String(me.username).toLowerCase()] : [])])];
+    const names = [...new Set([...top.slice(0, 10).map(x => String(x.username).toLowerCase()), ...(me ? [String(me.username).toLowerCase()] : [])])];
     const streakMap = {};
     if (names.length) {
       const hist = await q("SELECT username, day::text AS d, count FROM otp_daily WHERE day >= DATE(" + PKT_DAY + ") - 29 AND username = ANY($1)", [names]);
       const byUser = {};
       hist.rows.forEach(h => { (byUser[h.username] = byUser[h.username] || {})[String(h.d).slice(0, 10)] = h.count; });
+      const todayRow = await q("SELECT username, otp_today FROM otp_counters WHERE username = ANY($1)", [names]);
+      const tMap = {}; todayRow.rows.forEach(x => { tMap[x.username] = x.otp_today; });
       names.forEach(n => {
         const days = byUser[n] || {};
-        const todayCount = top.find(r => String(r.username).toLowerCase() === n)?.count || 0;
+        const todayCount = tMap[n] || 0;
         let s = 0, cur = todayCount > 0 ? utcToday : utcYest;
         for (let i = 0; i < 30; i++) { const c = cur === utcToday ? todayCount : (days[cur] || 0); if (c > 0) { s++; cur = prevDayStr(cur); } else break; }
         streakMap[n] = s;
@@ -169,7 +157,7 @@ R.post('/api/leaderboard', A.verify, async (req, res) => {
     let prevRank = {};
     if (rg === 'today') {
       const yAll = await q("SELECT username, count FROM otp_daily WHERE day = DATE(" + PKT_DAY + ") - 1 ORDER BY 2 DESC LIMIT 60");
-      yAll.rows.forEach((r, i) => { prevRank[String(r.username).toLowerCase()] = i + 1; });
+      yAll.rows.forEach((x, i) => { prevRank[String(x.username).toLowerCase()] = i + 1; });
     }
     const apply = o => {
       const n = String(o.username).toLowerCase();
