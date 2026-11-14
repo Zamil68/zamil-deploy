@@ -3,7 +3,8 @@ import { useAuth } from './context/AuthContext';
 import { useToast } from './context/ToastContext';
 import { useLive } from './context/LiveContext';
 import { Header } from './components/Header';
-import { Navigation, ActiveTab } from './components/Navigation';
+import { Navigation } from './components/Navigation';
+import type { ActiveTab } from './components/Navigation';
 import { RangesView } from './components/RangesView';
 import { NumbersView } from './components/NumbersView';
 import { InboxView } from './components/InboxView';
@@ -18,68 +19,140 @@ import { LiveOtpFloatingCard } from './components/LiveOtpFloatingCard';
 import { LoginView } from './components/LoginView';
 import { postApi } from './services/api';
 import type { RangeItem, SmsMessage, LeaderboardData, NotificationItem } from './types';
+
 type AppSubPage = 'dashboard' | 'admin' | 'cli' | 'notifications' | 'password';
-// Zoom: 1 = normal (current system look). + zooms in, − zooms out. User side only.
+type LbRange = 'today' | 'week' | 'month';
+type ReqKind = 'ranges' | 'numbers' | 'lb' | 'dor' | 'notif' | 'sms';
+
 const ZOOM_MIN = 0.8, ZOOM_MAX = 1.5;
 const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(z * 10) / 10));
+
+const RANGES_THROTTLE_MS = 8000;
+const WINDOW_THROTTLE_MS = 120000;
+const NOTIF_POLL_MS = 40000;
+const SEEN_CAP = 800;
+const OTP_PER_NUMBER_CAP = 30;
+
+const smsKey = (m: SmsMessage) => `${m.number}|${m.cli}|${m.time}`;
+const EMPTY_LB: LeaderboardData = { users: [], total: 0 };
+
 function DashboardContent() {
   const { isLoggedIn, username } = useAuth();
   const { showToast } = useToast();
   const live = useLive();
+
+  // ── navigation ──
   const [activeTab, setActiveTab] = useState<ActiveTab>('ranges');
   const [subPage, setSubPage] = useState<AppSubPage>('dashboard');
   const [adminInitialTab, setAdminInitialTab] = useState<string>('scc');
+  const [navRestored, setNavRestored] = useState(false);
+
+  // ── data ──
   const [selectedRange, setSelectedRange] = useState<RangeItem | null>(null);
   const [ranges, setRanges] = useState<RangeItem[]>([]);
   const [numbers, setNumbers] = useState<string[]>([]);
   const [smsMessages, setSmsMessages] = useState<SmsMessage[]>([]);
-  const [todaySmsCount, setTodaySmsCount] = useState<number>(0);
-  const [weekSmsCount, setWeekSmsCount] = useState<number>(0);
-  const [monthSmsCount, setMonthSmsCount] = useState<number>(0);
-  const [leaderboardData, setLeaderboardData] = useState<LeaderboardData>({ users: [], total: 0 });
-  const [leaderboardRange, setLeaderboardRange] = useState<'today' | 'week' | 'month'>('today');
+  const [todaySmsCount, setTodaySmsCount] = useState(0);
+  const [weekSmsCount, setWeekSmsCount] = useState(0);
+  const [monthSmsCount, setMonthSmsCount] = useState(0);
+  const [leaderboardData, setLeaderboardData] = useState<LeaderboardData>(EMPTY_LB);
+  const [leaderboardRange, setLeaderboardRange] = useState<LbRange>('today');
   const [dorMessages, setDorMessages] = useState<SmsMessage[]>([]);
   const [hasDorAccess, setHasDorAccess] = useState(false);
+  const [dorChecked, setDorChecked] = useState(false);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
-  const [latestOtpAlert, setLatestOtpAlert] = useState<{
-    number: string; cli: string; message: string; time: string; burst?: number;
-  } | null>(null);
-  const [zoom, setZoom] = useState<number>(1);
-  // FIX: tick that re-renders NumbersView when a per-number OTP counter increments (live)
+  const [latestOtpAlert, setLatestOtpAlert] = useState<
+    { number: string; cli: string; message: string; time: string; burst?: number } | null
+  >(null);
+
+  // ── ui ──
+  const [zoom, setZoom] = useState(1);
   const [numOtpTick, setNumOtpTick] = useState(0);
-  // FIX: one-time navigation restore flag (refresh memory)
-  const [navRestored, setNavRestored] = useState(false);
-  const prevSmsCountRef = useRef<number>(0);
+  const [rangesBusy, setRangesBusy] = useState(false);
+  const [smsBusy, setSmsBusy] = useState(false);
+  const [lbBusy, setLbBusy] = useState(false);
+  const [dorBusy, setDorBusy] = useState(false);
+
+  // ── refs: epoch guards every async response (no cross-user / stale writes) ──
+  const epochRef = useRef(0);
+  const userKeyRef = useRef<string | null>(null);
+  const activeRef = useRef(isLoggedIn);
+  const reqIdRef = useRef<Record<ReqKind, number>>({ ranges: 0, numbers: 0, lb: 0, dor: 0, notif: 0, sms: 0 });
+  const lbRangeRef = useRef<LbRange>(leaderboardRange);
+  const smsSeededRef = useRef(false);
   const seenSmsKeysRef = useRef<Set<string>>(new Set());
-  const lastRangeFetchRef = useRef<number>(0);
-  const rangeRetryRef = useRef<number>(0);
+  const lastRangeFetchRef = useRef(0);
+  const rangeRetryRef = useRef(0);
+  const lastWindowFetchRef = useRef(0);
+
   const navKey = 'zamil_nav_' + (username || '');
-  // ── Per-user zoom preference (remembered on this device, each user picks their own) ──
+  const userKey = isLoggedIn ? (username || '') : '';
+
+  useEffect(() => { activeRef.current = isLoggedIn; }, [isLoggedIn]);
+  useEffect(() => { lbRangeRef.current = leaderboardRange; }, [leaderboardRange]);
+
+  const begin = (kind: ReqKind) => ({ epoch: epochRef.current, id: ++reqIdRef.current[kind] });
+  const stale = (kind: ReqKind, t: { epoch: number; id: number }) =>
+    t.epoch !== epochRef.current || reqIdRef.current[kind] !== t.id;
+
+  // ── WIPE everything on logout / account switch (was leaking user A's data to user B) ──
   useEffect(() => {
+    if (userKeyRef.current === userKey) return;
+    userKeyRef.current = userKey;
+    epochRef.current++;
+    if (rangeRetryRef.current) { clearTimeout(rangeRetryRef.current); rangeRetryRef.current = 0; }
+    lastRangeFetchRef.current = 0;
+    lastWindowFetchRef.current = 0;
+    smsSeededRef.current = false;
+    seenSmsKeysRef.current = new Set();
+    setRanges([]); setNumbers([]); setSmsMessages([]); setDorMessages([]);
+    setNotifications([]); setSelectedRange(null);
+    setTodaySmsCount(0); setWeekSmsCount(0); setMonthSmsCount(0);
+    setLeaderboardData(EMPTY_LB); setLatestOtpAlert(null);
+    setHasDorAccess(false); setDorChecked(false);
+    setRangesBusy(false); setSmsBusy(false); setLbBusy(false); setDorBusy(false);
+    if (!isLoggedIn) {
+      setNavRestored(false);
+      setActiveTab('ranges'); setSubPage('dashboard'); setAdminInitialTab('scc');
+      setLeaderboardRange('today'); setZoom(1);
+    }
+  }, [userKey, isLoggedIn]);
+
+  // clear the deferred ranges timer on unmount
+  useEffect(() => () => { if (rangeRetryRef.current) clearTimeout(rangeRetryRef.current); }, []);
+
+  // ── zoom (per user, per device) ──
+  useEffect(() => {
+    if (!isLoggedIn) return;
     try {
       const v = parseFloat(localStorage.getItem('zamil_zoom_' + (username || '')) || '1');
       setZoom(isNaN(v) ? 1 : clampZoom(v));
     } catch { setZoom(1); }
-  }, [username]);
+  }, [isLoggedIn, username]);
+
   const changeZoom = useCallback((z: number) => {
     const c = clampZoom(z);
     setZoom(c);
     try { localStorage.setItem('zamil_zoom_' + (username || ''), String(c)); } catch {}
   }, [username]);
+
+  // ── fetchers ──
   const fetchRanges = useCallback(async (force = false) => {
-    try {
-      const res = await postApi<any>('/api/ranges', { forceRefresh: force });
-      if (res && res.ok && res.ranges) setRanges(res.ranges);
-    } catch {}
+    if (!activeRef.current) return;
+    const t = begin('ranges');
+    setRangesBusy(true);
+    const res = await postApi<any>('/api/ranges', { forceRefresh: force });
+    if (stale('ranges', t)) return;
+    setRangesBusy(false);
+    if (res?.ok && Array.isArray(res.ranges)) setRanges(res.ranges);
   }, []);
-  // ── FIX: ranges refresh that NEVER drops an update ──
-  // Old code: if a fetch happened <8s ago, the SSE "ranges changed" event was ignored
-  // forever → new range missing from the dashboard. Now: too soon? schedule a retry
-  // exactly when the throttle window ends. force=true jumps the queue.
+
+  // throttled, but a pending refresh is never dropped — force jumps the queue
   const requestRangesFetch = useCallback((force = false) => {
-    const now = Date.now();
-    const wait = force ? 0 : Math.max(0, 8000 - (now - lastRangeFetchRef.current));
+    if (!activeRef.current) return;
+    const wait = force ? 0 : Math.max(0, RANGES_THROTTLE_MS - (Date.now() - lastRangeFetchRef.current));
     if (wait === 0) {
+      if (rangeRetryRef.current) { clearTimeout(rangeRetryRef.current); rangeRetryRef.current = 0; }
       lastRangeFetchRef.current = Date.now();
       fetchRanges(force);
       return;
@@ -92,97 +165,161 @@ function DashboardContent() {
       }, wait);
     }
   }, [fetchRanges]);
+
   const fetchNumbers = useCallback(async (range: RangeItem) => {
-    try {
-      const res = await postApi<any>('/api/numbers', { rangeId: range.id, rangeTitle: range.title, limit: 500 });
-      if (res && res.ok && res.numbers) {
-        const list = res.numbers.map((n: any) => typeof n === 'string' ? n : n.numberFull || n.number || Object.values(n)[0] || '');
-        setNumbers(list);
-      }
-    } catch { showToast('Numbers load failed', 'error'); }
+    if (!activeRef.current || !range?.id) return;
+    const t = begin('numbers');
+    const res = await postApi<any>('/api/numbers', { rangeId: range.id, rangeTitle: range.title, limit: 500 });
+    if (stale('numbers', t)) return; // fast range switching can no longer show the wrong list
+    if (res?.ok && Array.isArray(res.numbers)) {
+      setNumbers(res.numbers.map((n: any) =>
+        typeof n === 'string' ? n : (n.numberFull || n.number || Object.values(n)[0] || '')
+      ).filter(Boolean));
+    } else if (res && res.ok === false) {
+      showToast(res.error || 'Numbers load failed', 'error');
+    }
   }, [showToast]);
-  // Single ingest point: updates list + raises ONE floating card with burst count
+
+  // single ingest point → list + ONE floating card with burst count
   const ingestSms = useCallback((count: number, rec: SmsMessage[]) => {
     setTodaySmsCount(count);
     setSmsMessages(rec);
-    const fresh = rec.filter((m) => !seenSmsKeysRef.current.has(`${m.number}|${m.cli}|${m.time}`));
+    const seen = seenSmsKeysRef.current;
+    const fresh = rec.filter((m) => !seen.has(smsKey(m)));
     if (fresh.length) {
-      fresh.forEach((m) => seenSmsKeysRef.current.add(`${m.number}|${m.cli}|${m.time}`));
-      if (prevSmsCountRef.current > 0) {
-        setLatestOtpAlert({ number: fresh[0].number, cli: fresh[0].cli, message: fresh[0].message, time: fresh[0].time, burst: fresh.length });
+      fresh.forEach((m) => seen.add(smsKey(m)));
+      // seed silently once; after that every new OTP alerts (incl. the first one after midnight)
+      if (smsSeededRef.current) {
+        const f = fresh[0];
+        setLatestOtpAlert({ number: f.number, cli: f.cli, message: f.message, time: f.time, burst: fresh.length });
       }
-      // FIX: live per-number OTP counters (max 30) — only numbers already copied (started)
       try {
         const sMap = JSON.parse(localStorage.getItem('zamil_numotp_start') || '{}');
         const cMap = JSON.parse(localStorage.getItem('zamil_numotp_count') || '{}');
-        let ch = false;
+        let changed = false;
         fresh.forEach((m) => {
-          if (sMap[m.number] != null && (cMap[m.number] || 0) < 30) { cMap[m.number] = (cMap[m.number] || 0) + 1; ch = true; }
+          if (sMap[m.number] != null && (cMap[m.number] || 0) < OTP_PER_NUMBER_CAP) {
+            cMap[m.number] = (cMap[m.number] || 0) + 1;
+            changed = true;
+          }
         });
-        if (ch) { localStorage.setItem('zamil_numotp_count', JSON.stringify(cMap)); setNumOtpTick((t) => t + 1); }
+        if (changed) {
+          localStorage.setItem('zamil_numotp_count', JSON.stringify(cMap));
+          setNumOtpTick((t) => t + 1);
+        }
       } catch {}
     }
-    prevSmsCountRef.current = count;
+    // bound the dedupe set (was growing forever)
+    if (seen.size > SEEN_CAP) seenSmsKeysRef.current = new Set(rec.map(smsKey));
+    smsSeededRef.current = true;
   }, []);
+
   const fetchSmsStream = useCallback(async () => {
-    try {
-      const res = await postApi<any>('/api/smscount');
-      if (res && res.ok) ingestSms(res.count ?? 0, Array.isArray(res.recent) ? res.recent : []);
-    } catch {}
+    if (!activeRef.current) return;
+    const t = begin('sms');
+    setSmsBusy(true);
+    const res = await postApi<any>('/api/smscount');
+    if (stale('sms', t)) return;
+    setSmsBusy(false);
+    if (res?.ok) ingestSms(res.count ?? 0, Array.isArray(res.recent) ? res.recent : []);
   }, [ingestSms]);
-  const fetchLeaderboard = useCallback(async (r = leaderboardRange) => {
-    try {
-      const res = await postApi<any>('/api/leaderboard', { range: r });
-      if (res && res.ok) {
-        setLeaderboardData({
-          users: res.users || [],
-          me: res.me || null,
-          total: res.total || (res.users || []).length,
-          scope: res.scope,
-          teamName: res.teamName,
-          mode: res.mode,
-          secondary: res.secondary || []
-        });
-      }
-    } catch {}
-  }, [leaderboardRange]);
+
+  const refreshWindowCounts = useCallback(async (force = false) => {
+    if (!activeRef.current) return;
+    const now = Date.now();
+    if (!force && now - lastWindowFetchRef.current < WINDOW_THROTTLE_MS) return;
+    lastWindowFetchRef.current = now;
+    const epoch = epochRef.current;
+    const [w, m] = await Promise.all([
+      postApi<any>('/api/smscount-range', { range: 'week' }),
+      postApi<any>('/api/smscount-range', { range: 'month' })
+    ]);
+    if (epoch !== epochRef.current) return;
+    if (w?.ok) setWeekSmsCount(w.count || 0);
+    if (m?.ok) setMonthSmsCount(m.count || 0);
+  }, []);
+
+  const fetchLeaderboard = useCallback(async (r?: LbRange) => {
+    if (!activeRef.current) return;
+    const range = r || lbRangeRef.current;
+    const t = begin('lb');
+    setLbBusy(true);
+    const res = await postApi<any>('/api/leaderboard', { range });
+    if (stale('lb', t)) return;
+    setLbBusy(false);
+    if (res?.ok) {
+      setLeaderboardData({
+        users: res.users || [],
+        me: res.me || null,
+        total: res.total || (res.users || []).length,
+        scope: res.scope,
+        teamName: res.teamName,
+        mode: res.mode,
+        secondary: res.secondary || []
+      });
+    }
+  }, []);
+
   const fetchDOR = useCallback(async () => {
-    try {
-      const res = await postApi<any>('/api/dor');
-      if (res && res.ok && res.recent) setDorMessages(res.recent);
-    } catch {}
+    if (!activeRef.current) return;
+    const t = begin('dor');
+    setDorBusy(true);
+    const res = await postApi<any>('/api/dor');
+    if (stale('dor', t)) return;
+    setDorBusy(false);
+    if (res?.ok && Array.isArray(res.recent)) setDorMessages(res.recent);
   }, []);
+
   const checkDorAccess = useCallback(async () => {
-    try {
-      const res = await postApi<any>('/api/dor/access');
-      if (res && res.ok) setHasDorAccess(!!res.allowed);
-    } catch {}
+    if (!activeRef.current) return;
+    const epoch = epochRef.current;
+    const res = await postApi<any>('/api/dor/access');
+    if (epoch !== epochRef.current) return;
+    if (res?.ok) setHasDorAccess(!!res.allowed);
+    setDorChecked(true);
   }, []);
+
   const fetchNotifications = useCallback(async () => {
-    try {
-      const res = await postApi<any>('/api/notifs/list');
-      if (res && res.ok && res.notifs) setNotifications(res.notifs);
-    } catch {}
+    if (!activeRef.current) return;
+    const t = begin('notif');
+    const res = await postApi<any>('/api/notifs/list');
+    if (stale('notif', t)) return;
+    if (res?.ok && Array.isArray(res.notifs)) setNotifications(res.notifs);
   }, []);
+
+  // ── initial load ──
   useEffect(() => {
     if (!isLoggedIn) return;
-    fetchRanges();
+    fetchRanges(true);
     fetchSmsStream();
     checkDorAccess();
     fetchNotifications();
-    postApi<any>('/api/smscount-range', { range: 'week' }).then((r) => r?.ok && setWeekSmsCount(r.count || 0));
-    postApi<any>('/api/smscount-range', { range: 'month' }).then((r) => r?.ok && setMonthSmsCount(r.count || 0));
-  }, [isLoggedIn, fetchRanges, fetchSmsStream, checkDorAccess, fetchNotifications]);
-  // ── FIX (Step 3): live red notification pill — re-check unread every 40s and on tab focus ──
+    refreshWindowCounts(true);
+  }, [isLoggedIn, fetchRanges, fetchSmsStream, checkDorAccess, fetchNotifications, refreshWindowCounts]);
+
+  // ── notification pill + window counters (paused while tab is hidden) ──
   useEffect(() => {
     if (!isLoggedIn) return;
-    const iv = setInterval(fetchNotifications, 40000);
-    const onVis = () => { if (!document.hidden) fetchNotifications(); };
+    const iv = window.setInterval(() => {
+      if (document.hidden) return;
+      fetchNotifications();
+      refreshWindowCounts();
+    }, NOTIF_POLL_MS);
+    const onVis = () => {
+      if (document.hidden) return;
+      fetchNotifications();
+      refreshWindowCounts();
+    };
     document.addEventListener('visibilitychange', onVis);
     window.addEventListener('focus', onVis);
-    return () => { clearInterval(iv); document.removeEventListener('visibilitychange', onVis); window.removeEventListener('focus', onVis); };
-  }, [isLoggedIn, fetchNotifications]);
-  // ── FIX: RESTORE last position once per login (tab, sub-page, admin tab, lb range, open range) ──
+    return () => {
+      clearInterval(iv);
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('focus', onVis);
+    };
+  }, [isLoggedIn, fetchNotifications, refreshWindowCounts]);
+
+  // ── restore last position once per login ──
   useEffect(() => {
     if (!isLoggedIn || navRestored) return;
     try {
@@ -191,66 +328,164 @@ function DashboardContent() {
         if (s.sub) setSubPage(s.sub);
         if (s.adminTab) setAdminInitialTab(s.adminTab);
         if (s.lbRange === 'today' || s.lbRange === 'week' || s.lbRange === 'month') setLeaderboardRange(s.lbRange);
-        if (s.range && s.range.id) { setSelectedRange(s.range); fetchNumbers(s.range); }
-        if (s.tab) setActiveTab(s.tab === 'numbers' ? (s.range && s.range.id ? 'numbers' : 'ranges') : s.tab);
+        if (s.range?.id) { setSelectedRange(s.range); fetchNumbers(s.range); }
+        if (s.tab) setActiveTab(s.tab === 'numbers' ? (s.range?.id ? 'numbers' : 'ranges') : s.tab);
         if (s.tab === 'top10') fetchLeaderboard(s.lbRange || 'today');
         if (s.tab === 'dor') fetchDOR();
       }
     } catch {}
     setNavRestored(true);
   }, [isLoggedIn, navRestored, navKey, fetchNumbers, fetchLeaderboard, fetchDOR]);
-  // ── FIX: SAVE position on every change (survives full browser refresh) ──
+
+  // ── persist position ──
   useEffect(() => {
     if (!isLoggedIn || !navRestored) return;
     try {
-      localStorage.setItem(navKey, JSON.stringify({ tab: activeTab, sub: subPage, adminTab: adminInitialTab, lbRange: leaderboardRange, range: selectedRange }));
+      localStorage.setItem(navKey, JSON.stringify({
+        tab: activeTab, sub: subPage, adminTab: adminInitialTab,
+        lbRange: leaderboardRange, range: selectedRange
+      }));
     } catch {}
   }, [activeTab, subPage, adminInitialTab, leaderboardRange, selectedRange, isLoggedIn, navRestored, navKey]);
-  // ── SSE bridge: live SMS feed replaces the old 5s polling ──
+
+  // ── SSE bridges ──
   useEffect(() => {
     if (!isLoggedIn) return;
     const rec = live.sms?.recent || [];
     if (!rec.length && (live.sms?.count || 0) === 0) return;
     ingestSms(live.sms.count || 0, rec);
   }, [live.sms, isLoggedIn, ingestSms]);
-  // ── Auto-refresh when DB changes (new range / numbers / leaderboard) ──
+
   useEffect(() => {
     if (!isLoggedIn || !live.rangesV) return;
     requestRangesFetch(false);
   }, [live.rangesV, isLoggedIn, requestRangesFetch]);
-  // ── FIX: Ship screen (or any component) can demand an immediate ranges refresh ──
+
   useEffect(() => {
     const h = () => requestRangesFetch(true);
     window.addEventListener('zamil:ranges-dirty', h);
     return () => window.removeEventListener('zamil:ranges-dirty', h);
   }, [requestRangesFetch]);
+
   useEffect(() => {
     if (!isLoggedIn || !live.numbersV || !selectedRange) return;
     fetchNumbers(selectedRange);
   }, [live.numbersV, isLoggedIn, selectedRange, fetchNumbers]);
+
   useEffect(() => {
     if (!isLoggedIn || !live.lbV) return;
-    fetchLeaderboard(leaderboardRange);
-  }, [live.lbV, isLoggedIn, fetchLeaderboard, leaderboardRange]);
+    fetchLeaderboard();
+  }, [live.lbV, isLoggedIn, fetchLeaderboard]);
+
+  // ── an open range that was freed / crushed / synced away closes itself ──
+  useEffect(() => {
+    if (!isLoggedIn || !selectedRange || !ranges.length) return;
+    if (ranges.some((r) => r.id === selectedRange.id)) return;
+    setSelectedRange(null);
+    setNumbers([]);
+    setActiveTab((t) => (t === 'numbers' ? 'ranges' : t));
+    showToast('Range no longer assigned', 'info');
+  }, [ranges, selectedRange, isLoggedIn, showToast]);
+
+  // ── DOR revoked while sitting on the DOR tab ──
+  useEffect(() => {
+    if (dorChecked && !hasDorAccess && activeTab === 'dor') setActiveTab('ranges');
+  }, [dorChecked, hasDorAccess, activeTab]);
+
+  // __ZAMIL_LIVE_V2__ ── DOR live feed + instant alerts + crush bridge
+  const lastDorFetchRef = useRef(0);
+  const dorLiveRefresh = useCallback(() => {
+    if (!activeRef.current || activeTab !== 'dor' || !hasDorAccess) return;
+    if (Date.now() - lastDorFetchRef.current < 8000) return;
+    lastDorFetchRef.current = Date.now();
+    fetchDOR();
+  }, [activeTab, hasDorAccess, fetchDOR]);
+
+  // while the DOR tab is open: 15s poll + refresh on focus (paused when hidden)
+  useEffect(() => {
+    if (!isLoggedIn || activeTab !== 'dor' || !hasDorAccess) return;
+    if (Date.now() - lastDorFetchRef.current > 3000) {
+      lastDorFetchRef.current = Date.now();
+      fetchDOR();
+    }
+    const iv = window.setInterval(() => {
+      if (document.hidden) return;
+      lastDorFetchRef.current = Date.now();
+      fetchDOR();
+    }, 15000);
+    const onVis = () => { if (!document.hidden) dorLiveRefresh(); };
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('focus', onVis);
+    return () => {
+      clearInterval(iv);
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('focus', onVis);
+    };
+  }, [isLoggedIn, activeTab, hasDorAccess, fetchDOR, dorLiveRefresh]);
+
+  // own OTP arrived → pull the global DOR feed immediately (throttled)
+  useEffect(() => {
+    if (!isLoggedIn || !live.sms) return;
+    dorLiveRefresh();
+  }, [live.sms, isLoggedIn, dorLiveRefresh]);
+
+  // notification bell: instant on SSE push (was up to 40s late)
+  const notifSeenRef = useRef(0);
+  useEffect(() => {
+    if (!isLoggedIn || live.notifV === notifSeenRef.current) return;
+    notifSeenRef.current = live.notifV;
+    fetchNotifications();
+  }, [live.notifV, isLoggedIn, fetchNotifications]);
+
+  // admin crushed a range → refresh ownership now
+  const crushSeenRef = useRef(0);
+  useEffect(() => {
+    if (!isLoggedIn || live.crushV === crushSeenRef.current) return;
+    crushSeenRef.current = live.crushV;
+    requestRangesFetch(true);
+    if (selectedRange) fetchNumbers(selectedRange);
+  }, [live.crushV, isLoggedIn, requestRangesFetch, selectedRange, fetchNumbers]);
+
   const dismissOtp = useCallback(() => setLatestOtpAlert(null), []);
-  const handleSelectRange = (range: RangeItem) => {
+
+  const handleSelectRange = useCallback((range: RangeItem) => {
     setSelectedRange(range);
     setActiveTab('numbers');
+    setNumbers([]);
     fetchNumbers(range);
-  };
-  const handleUnassignRange = async (rangeId: string, rangeTitle: string, count: number) => {
-    try {
-      const res = await postApi<any>('/api/range/unassign', { rangeId });
-      if (res && res.ok) {
-        showToast(`✓ Freed ${count} numbers`, 'success');
-        requestRangesFetch(true);
+  }, [fetchNumbers]);
+
+  const handleUnassignRange = useCallback(async (rangeId: string, _rangeTitle: string, count: number) => {
+    const res = await postApi<any>('/api/range/unassign', { rangeId });
+    if (res?.ok) {
+      showToast(`✓ Freed ${res.removed ?? count} numbers`, 'success');
+      if (selectedRange?.id === rangeId) {
+        setSelectedRange(null);
+        setNumbers([]);
+        setActiveTab((t) => (t === 'numbers' ? 'ranges' : t));
       }
-    } catch { showToast('Unassign failed', 'error'); }
-  };
+      requestRangesFetch(true);
+      refreshWindowCounts(true);
+    } else {
+      showToast(res?.error || 'Unassign failed', 'error');
+    }
+  }, [showToast, selectedRange, requestRangesFetch, refreshWindowCounts]);
+
+  const handleTabChange = useCallback((tab: ActiveTab) => {
+    setSubPage('dashboard');
+    // an open range stays open — the ← button inside NumbersView closes it
+    setActiveTab(tab === 'ranges' && selectedRange ? 'numbers' : tab);
+    if (tab === 'top10') fetchLeaderboard();
+    if (tab === 'dor') fetchDOR();
+  }, [selectedRange, fetchLeaderboard, fetchDOR]);
+
+  const backToDashboard = useCallback(() => setSubPage('dashboard'), []);
+
   if (!isLoggedIn) return <LoginView />;
-  const unreadCount = notifications.filter((n) => !n.read).length;
-  // Zoom applies to the user side only — Admin Hub / CLI Insights always stay at normal size
+
+  const unreadCount = notifications.reduce((n, x) => n + (x.read ? 0 : 1), 0);
   const pageZoom = (subPage === 'admin' || subPage === 'cli') ? 1 : zoom;
+
   return (
     <div
       className="min-h-screen w-full max-w-full overflow-x-hidden bg-slate-50 dark:bg-[#0b1120] text-slate-900 dark:text-slate-100 flex flex-col transition-colors selection:bg-cyan-500 selection:text-white"
@@ -267,11 +502,15 @@ function DashboardContent() {
         zoom={zoom}
         onZoom={changeZoom}
       />
+
       <main className="flex-1 w-full max-w-5xl mx-auto px-2.5 sm:px-6 pt-2.5 pb-20 overflow-x-hidden">
-        {subPage === 'cli' && <CliInsightsView onBack={() => setSubPage('dashboard')} />}
-        {subPage === 'admin' && <AdminConsoleView initialTab={adminInitialTab} onBack={() => setSubPage('dashboard')} />}
-        {subPage === 'notifications' && <NotificationsView notifications={notifications} onBack={() => setSubPage('dashboard')} onRefresh={fetchNotifications} />}
-        {subPage === 'password' && <ChangePasswordView onBack={() => setSubPage('dashboard')} />}
+        {subPage === 'cli' && <CliInsightsView onBack={backToDashboard} />}
+        {subPage === 'admin' && <AdminConsoleView initialTab={adminInitialTab} onBack={backToDashboard} />}
+        {subPage === 'notifications' && (
+          <NotificationsView notifications={notifications} onBack={backToDashboard} onRefresh={fetchNotifications} />
+        )}
+        {subPage === 'password' && <ChangePasswordView onBack={backToDashboard} />}
+
         {subPage === 'dashboard' && (
           <>
             {activeTab === 'ranges' && (
@@ -283,52 +522,60 @@ function DashboardContent() {
                 smsCountToday={todaySmsCount}
                 smsCountWeek={weekSmsCount}
                 smsCountMonth={monthSmsCount}
-                isLoading={false}
+                isLoading={rangesBusy}
               />
             )}
+
             {activeTab === 'numbers' && selectedRange && (
               <NumbersView
                 range={selectedRange}
                 numbers={numbers}
                 liveTick={numOtpTick}
-                onBack={() => { setActiveTab('ranges'); setSelectedRange(null); }}
+                onBack={() => { setActiveTab('ranges'); setSelectedRange(null); setNumbers([]); }}
                 onRefresh={() => fetchNumbers(selectedRange)}
               />
             )}
-            {activeTab === 'inbox' && <InboxView messages={smsMessages} todayCount={todaySmsCount} weekCount={weekSmsCount} monthCount={monthSmsCount} onRefresh={fetchSmsStream} isLoading={false} />}
+
+            {activeTab === 'inbox' && (
+              <InboxView
+                messages={smsMessages}
+                todayCount={todaySmsCount}
+                weekCount={weekSmsCount}
+                monthCount={monthSmsCount}
+                onRefresh={fetchSmsStream}
+                isLoading={smsBusy}
+              />
+            )}
+
             {activeTab === 'add' && <AddNumbersView />}
+
             {activeTab === 'top10' && (
               <LeaderboardView
                 data={leaderboardData}
                 activeRange={leaderboardRange}
-                onChangeRange={(r) => { setLeaderboardRange(r); fetchLeaderboard(r); }}
-                onRefresh={() => fetchLeaderboard(leaderboardRange)}
-                isLoading={false}
+                onChangeRange={(r) => { setLeaderboardRange(r); lbRangeRef.current = r; fetchLeaderboard(r); }}
+                onRefresh={() => fetchLeaderboard()}
+                isLoading={lbBusy}
               />
             )}
-            {activeTab === 'dor' && <DORView messages={dorMessages} onRefresh={fetchDOR} isLoading={false} />}
+
+            {activeTab === 'dor' && <DORView messages={dorMessages} onRefresh={fetchDOR} isLoading={dorBusy} />}
           </>
         )}
       </main>
+
       <Navigation
         activeTab={activeTab}
-        onTabChange={(tab) => {
-          setSubPage('dashboard');
-          // FIX: an open range stays open — tapping "Ranges" returns to its numbers view
-          // (the ← back button inside NumbersView is the only way to close it).
-          if (tab === 'ranges' && selectedRange) setActiveTab('numbers');
-          else setActiveTab(tab);
-          if (tab === 'top10') fetchLeaderboard();
-          if (tab === 'dor') fetchDOR();
-        }}
+        onTabChange={handleTabChange}
         smsCountToday={todaySmsCount}
         hasDorAccess={hasDorAccess}
       />
+
       <LiveOtpFloatingCard message={latestOtpAlert} onDismiss={dismissOtp} />
     </div>
   );
 }
+
 export default function App() {
   return <DashboardContent />;
 }
-// === EOF: App.tsx ===
