@@ -23,6 +23,8 @@ const [liveBusy, setLiveBusy] = useState(false);
 // FIX: real country name (carriers like Celcom/Maxis/AWCC ignored) → same country groups together
 const countryOfTitle = (t: string) => canonicalCountry(splitRangeName(t).country);
 useEffect(() => { setLiveToday(smsCountToday || 0); }, [smsCountToday]);
+  // a query searches every country, not just the one drilled into
+  useEffect(() => { if (q.trim()) setOpenCountry(null); }, [q]);
 const refreshLive = async () => { setLiveBusy(true); const d = await postApi<any>('/api/smscount'); if (d?.ok) setLiveToday(d.count || 0); setLiveBusy(false); };
 const refresh = async () => { setBusy(true); if (onRefreshRanges) await onRefreshRanges(); else if (onRefresh) await onRefresh(); setBusy(false); };
 const filtered = useMemo(() => {
