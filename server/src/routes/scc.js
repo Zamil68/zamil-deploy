@@ -40,9 +40,11 @@ R.post('/api/scc/status', A.verify, async (req, res) => {
   const G = global;
   const dbMax = await q("SELECT MAX(time) AS t FROM sms_cdr");
   const dbMs = dbMax.rows[0] && dbMax.rows[0].t ? new Date(dbMax.rows[0].t).getTime() : 0;
-  const effLast = Math.max(G.__cdrLast || 0, dbMs);
-  const cdrLag = effLast ? Math.round((now - effLast) / 60000) : null;
-  const cdrStatus = cdrLag != null && cdrLag < 5 ? 'live' : cdrLag != null && cdrLag < 15 ? 'sleep' : 'dead';
+  // Liveness = last successful poll (idle traffic is healthy). Lag = age of newest OTP.
+  const okAt = G.__cdrOkAt || G.__cdrLast || 0;
+  const pollAge = okAt ? Math.round((now - okAt) / 60000) : null;
+  const cdrLag = dbMs ? Math.round((now - dbMs) / 60000) : null;
+  const cdrStatus = pollAge == null ? 'dead' : pollAge < 5 ? 'live' : pollAge < 15 ? 'sleep' : 'dead';
   const daemons = [
     { id: 1, name: 'CDR', agoMin: G.__cdrHb ? Math.round((now - G.__cdrHb) / 60000) : null, ok: !!(G.__cdrHb && now - G.__cdrHb < 60000) },
     { id: 2, name: 'Sync', agoMin: G.__syncHb ? Math.round((now - G.__syncHb) / 60000) : null, ok: !!(G.__syncHb && now - G.__syncHb < 60000) },
@@ -61,7 +63,7 @@ R.post('/api/scc/status', A.verify, async (req, res) => {
   const qSize = qRow.rows[0].n, oldestMin = qRow.rows[0].t ? Math.round((now - new Date(qRow.rows[0].t).getTime()) / 60000) : 0;
   const pTotal = poolRow.rows[0].f + poolRow.rows[0].a;
   const alerts = [];
-  if (cdrStatus === 'dead') alerts.push({ severity: 'critical', message: 'CDR stream offline (' + (cdrLag == null ? '?' : cdrLag) + 'm lag)' });
+  if (cdrStatus === 'dead') alerts.push({ severity: 'critical', message: 'CDR poller offline (' + (pollAge == null ? '?' : pollAge) + 'm since last successful poll)' });
   if (activeD < daemons.length) alerts.push({ severity: 'warning', message: (daemons.length - activeD) + '/' + daemons.length + ' daemons stale' });
   if (qSize > 100) alerts.push({ severity: 'critical', message: 'Queue overload: ' + qSize });
   let score = 100;
@@ -69,7 +71,7 @@ R.post('/api/scc/status', A.verify, async (req, res) => {
   score -= (daemons.length - activeD) * 8;
   if (qSize > 100) score -= 20; else if (qSize > 50) score -= 10; else if (qSize > 15) score -= 5;
   score = Math.max(0, Math.min(100, score));
-  if (cdrStatus === 'dead') q("INSERT INTO system_incidents (type,severity,title,message,status) SELECT 'scc_cdr_dead','critical','CDR stream dead','No CDR inserts for " + (cdrLag == null ? '?' : cdrLag) + "m.','pending' WHERE NOT EXISTS (SELECT 1 FROM system_incidents WHERE type='scc_cdr_dead' AND status='pending' AND created_at >= NOW() - interval '10 minutes')").catch(() => {});
+  if (cdrStatus === 'dead') q("INSERT INTO system_incidents (type,severity,title,message,status) SELECT 'scc_cdr_dead','critical','CDR stream dead','CDR poller has not succeeded for " + (pollAge == null ? '?' : pollAge) + "m.','pending' WHERE NOT EXISTS (SELECT 1 FROM system_incidents WHERE type='scc_cdr_dead' AND status='pending' AND created_at >= NOW() - interval '10 minutes')").catch(() => {});
   const payload = {
     timestamp: new Date().toISOString(),
     system: { status: alerts.some(a => a.severity === 'critical') ? 'critical' : alerts.length ? 'warning' : 'healthy', score, cdr: cdrStatus },
@@ -89,6 +91,7 @@ R.post('/api/scc/broadcast', A.verify, async (req, res) => {
   await q("INSERT INTO app_notifs (target,type,title,body,created_by) VALUES ('*','system_alert',$1,$2,$3)",
     ['⚙️ ' + String(req.body.title || 'System notice'), String(req.body.message || ''), req.user.username]);
   if (req.body.id) await q("UPDATE system_incidents SET status='broadcasted' WHERE id=$1", [String(req.body.id)]);
+sse.broadcast('notif');
   ok(res, { pushed: true });
 });
 R.post('/api/scc/dismiss-all', A.verify, async (req, res) => {
