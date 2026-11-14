@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { postApi } from '../services/api';
@@ -7,15 +7,30 @@ import { Card, PageHead, IconBtn } from './Ui';
 import { Ship, Search, RefreshCw, ChevronDown, ChevronUp, Anchor, AlertCircle, Sparkles, TrendingUp, Package, CheckCircle2, Loader2 } from 'lucide-react';
 
 interface FreeRange { id: string; range: string; country: string; available: number; total: number; }
-
-const POPULAR_COUNTRIES = [
-  { name: 'Tunisia', emoji: '🇹🇳', tag: 'Hot' },
-  { name: 'Angola', emoji: '🇦🇴', tag: 'Popular' },
-  { name: 'Palestine', emoji: '🇵🇸', tag: 'Trending' },
-];
+interface TrendItem { name: string; flag: string; metric: string; tone: 'hot' | 'free'; qty: number; free: number; }
 
 const DOCK_POLL_MS = 8000;
 const POOL_POLL_MS = 15000;
+const TREND_POOL_MS = 30000;
+const TREND_SLOTS = 3;
+
+// "970 + 972 - Palestine" → "Palestine"
+const cleanCountry = (s: string) => {
+  const t = String(s || '').replace(/^[\d+\s\-]+/, '').trim();
+  return t || String(s || '').trim();
+};
+// fallback when a dock range is no longer in the free pool
+const countryFromRange = (t: string) => {
+  const s = String(t || '');
+  const m = s.match(/^(.+?)[\s-](?:LX|MX|RX|DC)\b/i) || s.match(/^([A-Za-z\s]+?)\d/);
+  return (m && m[1] ? m[1] : s).trim();
+};
+const kfmt = (n: number) => {
+  const v = Math.max(0, Math.round(n || 0));
+  if (v >= 1000000) return (v / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (v >= 1000) return (v / 1000).toFixed(v >= 10000 ? 0 : 1).replace(/\.0$/, '') + 'k';
+  return String(v);
+};
 
 export const AddNumbersView: React.FC = () => {
   const { username } = useAuth();
@@ -23,6 +38,7 @@ export const AddNumbersView: React.FC = () => {
 
   const [q, setQ] = useState('');
   const [ranges, setRanges] = useState<FreeRange[]>([]);
+  const [pool, setPool] = useState<FreeRange[]>([]);   // full free pool → trending fallback + country lookup
   const [sel, setSel] = useState<FreeRange | null>(null);
   const [qty, setQty] = useState('5');
   const [limits, setLimits] = useState<any>(null);
@@ -32,6 +48,7 @@ export const AddNumbersView: React.FC = () => {
   const [searched, setSearched] = useState(false);
   const [err, setErr] = useState('');
   const [dock, setDock] = useState<any[]>([]);
+  const [dockIsAdmin, setDockIsAdmin] = useState(false);
   const [dockOpen, setDockOpen] = useState(false);
   const [confirm, setConfirm] = useState<{ range: FreeRange; qty: number } | null>(null);
   const [shippingAnim, setShippingAnim] = useState(false);
@@ -39,7 +56,9 @@ export const AddNumbersView: React.FC = () => {
 
   const shipTimer = useRef<any>(null);
   const reqId = useRef(0);
+  const poolReqId = useRef(0);
   const poolSig = useRef('');
+  const freeSig = useRef('');
   const dockSig = useRef('');
   const qRef = useRef('');
   const selRef = useRef<FreeRange | null>(null);
@@ -77,9 +96,23 @@ export const AddNumbersView: React.FC = () => {
     }
   }, []);
 
+  // whole free pool, never touches `searched` → powers trending without opening the results card
+  const loadPool = useCallback(async () => {
+    const id = ++poolReqId.current;
+    const r = await postApi<any>('/api/alloc/search-ranges', { query: '' });
+    if (id !== poolReqId.current || !r?.ok) return;
+    const mapped: FreeRange[] = (r.ranges || []).map((x: any) => ({
+      id: x.id, range: x.title || x.range, country: x.country,
+      available: x.available ?? 0, total: x.total ?? 0
+    }));
+    const sig = mapped.map((x) => x.id + ':' + x.available).join('|');
+    if (sig !== freeSig.current) { freeSig.current = sig; setPool(mapped); }
+  }, []);
+
   const loadDock = useCallback(async () => {
     const r = await postApi<any>('/api/alloc/queue-list');
     if (!r?.ok) return;
+    setDockIsAdmin(!!r.admin);
     const items = r.items || [];
     const sig = items.map((x: any) => x.id + ':' + x.status).join('|');
     if (sig !== dockSig.current) { dockSig.current = sig; setDock(items); }
@@ -87,9 +120,11 @@ export const AddNumbersView: React.FC = () => {
 
   useEffect(() => {
     loadDock();
+    loadPool();
     const t = setInterval(() => { if (!document.hidden) loadDock(); }, DOCK_POLL_MS);
-    return () => clearInterval(t);
-  }, [loadDock]);
+    const p = setInterval(() => { if (!document.hidden) loadPool(); }, TREND_POOL_MS);
+    return () => { clearInterval(t); clearInterval(p); };
+  }, [loadDock, loadPool]);
 
   // after the first successful search, keep the pool fresh in the background
   useEffect(() => {
@@ -100,6 +135,74 @@ export const AddNumbersView: React.FC = () => {
     }, POOL_POLL_MS);
     return () => clearInterval(t);
   }, [searched, loadRanges]);
+
+  // ── TRENDING: real demand from the Dock, filled with the biggest free stock ──
+  const trending = useMemo<TrendItem[]>(() => {
+    const byId = new Map<string, FreeRange>();
+    const byTitle = new Map<string, FreeRange>();
+    const freeByCountry = new Map<string, { name: string; available: number }>();
+
+    pool.forEach((r) => {
+      byId.set(String(r.id), r);
+      byTitle.set(String(r.range || '').toLowerCase(), r);
+      const name = cleanCountry(r.country);
+      if (!name) return;
+      const k = name.toLowerCase();
+      const cur = freeByCountry.get(k);
+      if (cur) cur.available += r.available;
+      else freeByCountry.set(k, { name, available: r.available });
+    });
+
+    // most-added countries today (pending + done; failed never delivered)
+    const demand = new Map<string, { name: string; qty: number; batches: number }>();
+    dock.forEach((it) => {
+      if (it.status === 'failed') return;
+      const hit = byId.get(String(it.range_id || '')) || byTitle.get(String(it.range_name || '').toLowerCase());
+      const name = cleanCountry(hit ? hit.country : countryFromRange(it.range_name));
+      if (!name) return;
+      const k = name.toLowerCase();
+      const n = Math.max(0, parseInt(it.qty, 10) || 0);
+      const cur = demand.get(k);
+      if (cur) { cur.qty += n; cur.batches += 1; }
+      else demand.set(k, { name, qty: n, batches: 1 });
+    });
+
+    const ranked = [...demand.values()].sort((a, b) => b.qty - a.qty || b.batches - a.batches);
+    const out: TrendItem[] = [];
+    const used = new Set<string>();
+
+    for (const d of ranked) {
+      if (out.length >= TREND_SLOTS) break;
+      const k = d.name.toLowerCase();
+      if (used.has(k)) continue;
+      used.add(k);
+      out.push({
+        name: d.name, flag: getCountryFlag(d.name),
+        metric: kfmt(d.qty) + ' added', tone: 'hot',
+        qty: d.qty, free: freeByCountry.get(k)?.available ?? 0
+      });
+    }
+
+    if (out.length < TREND_SLOTS) {
+      const fill = [...freeByCountry.values()].sort((a, b) => b.available - a.available);
+      for (const f of fill) {
+        if (out.length >= TREND_SLOTS) break;
+        const k = f.name.toLowerCase();
+        if (used.has(k) || f.available <= 0) continue;
+        used.add(k);
+        out.push({
+          name: f.name, flag: getCountryFlag(f.name),
+          metric: kfmt(f.available) + ' free', tone: 'free',
+          qty: 0, free: f.available
+        });
+      }
+    }
+    return out;
+  }, [dock, pool]);
+
+  const trendSource = trending.some((t) => t.tone === 'hot')
+    ? (dockIsAdmin ? "today's dock" : 'your dock today')
+    : 'most free stock';
 
   const runSearch = (value: string) => {
     setQ(value); qRef.current = value;
@@ -130,6 +233,7 @@ export const AddNumbersView: React.FC = () => {
       setSel(null); setLimits(null);
       loadRanges(qRef.current, true);
       loadDock();
+      loadPool();
       window.dispatchEvent(new Event('zamil:ranges-dirty'));
     } else if (d?.limitReached) {
       showToast(`🚫 ${d.message || 'Limit reached'}`, 'error');
@@ -145,7 +249,7 @@ export const AddNumbersView: React.FC = () => {
   return (
     <div className="w-full max-w-full overflow-hidden space-y-2 pb-16">
       <PageHead title="Ship" chip={pending || undefined} sub={`to ${username}`}
-        right={<IconBtn onClick={() => { loadRanges(qRef.current, true); loadDock(); }} disabled={busy || refreshing} title="Refresh">
+        right={<IconBtn onClick={() => { loadRanges(qRef.current, true); loadDock(); loadPool(); }} disabled={busy || refreshing} title="Refresh">
           <RefreshCw className={`w-3.5 h-3.5 ${busy || refreshing ? 'animate-spin text-cyan-500' : ''}`} />
         </IconBtn>} />
 
@@ -166,7 +270,7 @@ export const AddNumbersView: React.FC = () => {
           <input type="text" value={q}
             onChange={(e) => { setQ(e.target.value); qRef.current = e.target.value; }}
             onKeyDown={(e) => e.key === 'Enter' && q.trim() && runSearch(q)}
-            placeholder="Country (e.g., Tunisia, Angola)"
+            placeholder="Search a country or range…"
             className="w-full pl-9 pr-3 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-900 dark:text-white placeholder:text-slate-400 outline-none focus:ring-2 focus:ring-cyan-500/40 focus:border-cyan-500/50 transition-all" />
         </div>
 
@@ -178,22 +282,32 @@ export const AddNumbersView: React.FC = () => {
 
         {err && <p className="text-[10px] font-bold text-rose-500">{err}</p>}
 
-        {!searched && !searching && (
+        {/* ── Trending: live demand from the Dock, else biggest free stock ── */}
+        {!searching && (!searched || ranges.length === 0) && (
           <div className="pt-2 border-t border-slate-100 dark:border-slate-800">
             <div className="flex items-center gap-1.5 mb-2">
-              <TrendingUp className="w-3 h-3 text-amber-500" />
-              <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400">Popular right now</span>
+              <TrendingUp className="w-3 h-3 text-amber-500 shrink-0" />
+              <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400">Trending now</span>
+              <span className="text-[8px] font-semibold text-slate-400/80 truncate">· {trendSource}</span>
             </div>
-            <div className="flex gap-1.5">
-              {POPULAR_COUNTRIES.map((c) => (
-                <button key={c.name} type="button" onClick={() => runSearch(c.name)}
-                  className="flex-1 py-2 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 hover:border-cyan-500/40 hover:bg-cyan-50 dark:hover:bg-cyan-950/20 transition-all cursor-pointer group">
-                  <div className="text-lg leading-none mb-0.5">{c.emoji}</div>
-                  <div className="text-[9px] font-bold text-slate-700 dark:text-slate-300 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 truncate">{c.name}</div>
-                  <div className="text-[7px] font-bold text-amber-500 uppercase">{c.tag}</div>
-                </button>
-              ))}
-            </div>
+
+            {trending.length === 0 ? (
+              <div className="flex items-center justify-center gap-1.5 py-3 text-[10px] font-bold text-slate-400">
+                <Loader2 className="w-3 h-3 animate-spin" /> Reading demand…
+              </div>
+            ) : (
+              <div className="flex gap-1.5">
+                {trending.map((c) => (
+                  <button key={c.name} type="button" onClick={() => runSearch(c.name)}
+                    title={`${c.name} · ${c.free} free${c.tone === 'hot' ? ` · ${c.qty} added today` : ''}`}
+                    className="flex-1 min-w-0 py-2 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 hover:border-cyan-500/40 hover:bg-cyan-50 dark:hover:bg-cyan-950/20 transition-colors cursor-pointer group">
+                    <div className="text-lg leading-none mb-0.5">{c.flag}</div>
+                    <div className="px-1 text-[9px] font-bold text-slate-700 dark:text-slate-300 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 truncate">{c.name}</div>
+                    <div className={`px-1 text-[7px] font-bold uppercase truncate ${c.tone === 'hot' ? 'text-amber-500' : 'text-emerald-500'}`}>{c.metric}</div>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </Card>
@@ -215,7 +329,7 @@ export const AddNumbersView: React.FC = () => {
                 <Package className="w-7 h-7 text-slate-400" />
               </div>
               <div className="text-xs font-bold text-slate-500 dark:text-slate-400">No ranges available</div>
-              <div className="text-[10px] text-slate-400 mt-0.5">Try a different country or keyword</div>
+              <div className="text-[10px] text-slate-400 mt-0.5">Pick a trending country above</div>
             </div>
           ) : (
             <div className="max-h-44 overflow-y-auto space-y-1">
