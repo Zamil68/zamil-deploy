@@ -15,9 +15,12 @@ interface AuthContextType {
   logout: () => void;
   toggleTheme: () => void;
   refreshRole: () => Promise<void>;
+  adoptSession: (s: string) => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
+const KEYS = ['app_session', 'app_username', 'app_client_id', 'app_client_name', 'app_role', 'app_panel_num'];
+const wipe = () => KEYS.forEach((k) => { try { localStorage.removeItem(k); } catch {} });
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [session, setSession] = useState<string | null>(() => localStorage.getItem('app_session'));
@@ -36,112 +39,87 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       document.documentElement.classList.remove('dark');
       document.documentElement.setAttribute('data-theme', 'light');
     }
-    localStorage.setItem('app_theme', theme);
+    try { localStorage.setItem('app_theme', theme); } catch {}
   }, [theme]);
 
-  const toggleTheme = useCallback(() => {
-    setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
-  }, []);
+  const toggleTheme = useCallback(() => setTheme((p) => (p === 'dark' ? 'light' : 'dark')), []);
 
   const refreshRole = useCallback(async () => {
-    try {
-      const res = await postApi<{ ok: boolean; role?: UserRole }>('/api/auth/role');
-      if (res && res.ok && res.role) {
-        setRole(res.role);
-        localStorage.setItem('app_role', res.role);
-      }
-    } catch {}
+    const res = await postApi<{ ok: boolean; role?: UserRole }>('/api/auth/role');
+    if (res && res.ok && res.role) {
+      setRole(res.role);
+      try { localStorage.setItem('app_role', res.role); } catch {}
+    }
   }, []);
 
-  useEffect(() => {
-    if (session) refreshRole();
-  }, [session, refreshRole]);
+  useEffect(() => { if (session) refreshRole(); }, [session, refreshRole]);
 
-  // Listen for forced logout from api.ts (401 responses)
+  // forced logout from api.ts (401)
   useEffect(() => {
     const onLogout = () => {
-      setSession(null);
-      setUsername('');
-      setClientId('');
-      setClientName('');
-      setRole('none');
+      wipe();
+      setSession(null); setUsername(''); setClientId(''); setClientName('');
+      setRole('none'); setPanelNum(1);
     };
     window.addEventListener('zamil:logout', onLogout);
     return () => window.removeEventListener('zamil:logout', onLogout);
   }, []);
 
+  // adopt a re-issued token (password change) without a full page reload
+  const adoptSession = useCallback((s: string) => {
+    if (!s) return;
+    try { localStorage.setItem('app_session', s); } catch {}
+    setSession(s);
+  }, []);
+
   const login = useCallback(async (u: string, p: string) => {
-    try {
-      const res = await postApi<any>('/api/login', { username: u, password: p }, { auth: false });
-      if (!res) return { ok: false, error: 'No response from server' };
+    const res = await postApi<any>('/api/login', { username: u, password: p }, { auth: false });
+    if (!res) return { ok: false, error: 'No response from server' };
 
-      // ── FIRST LOGIN: user exists but has no password → show activation screen ──
-      if (res.firstLogin && !res.session) {
-        return {
-          ok: false,
-          firstLogin: true,
-          username: res.username || u,
-          clientId: res.clientId || '',
-          clientName: res.clientName || u
-        };
-      }
+    if (res.firstLogin && !res.session) {
+      return { ok: false, firstLogin: true, username: res.username || u, clientId: res.clientId || '', clientName: res.clientName || u };
+    }
 
-      // ── NORMAL LOGIN: valid session returned ──
-      if (res.ok && res.session) {
-        const sess = res.session;
-        const uname = res.username || u;
-        const cId = String(res.clientId || '');
-        const cName = res.clientName || uname;
-        const pNum = res.panelNum || 1;
+    if (res.ok && res.session) {
+      const sess = res.session;
+      const uname = res.username || u;
+      const cId = String(res.clientId || '');
+      const cName = res.clientName || uname;
+      const pNum = res.panelNum || 1;
 
-        setSession(sess);
-        setUsername(uname);
-        setClientId(cId);
-        setClientName(cName);
-        setPanelNum(pNum);
-
+      setSession(sess); setUsername(uname); setClientId(cId); setClientName(cName); setPanelNum(pNum);
+      // never inherit the previous account's role while the new one loads
+      setRole('none');
+      try {
         localStorage.setItem('app_session', sess);
         localStorage.setItem('app_username', uname);
         localStorage.setItem('app_client_id', cId);
         localStorage.setItem('app_client_name', cName);
         localStorage.setItem('app_panel_num', String(pNum));
+        localStorage.removeItem('app_role');
+      } catch {}
 
-        // Fetch real role after login
-        try {
-          const roleRes = await postApi<any>('/api/auth/role', { session: sess });
-          if (roleRes?.ok && roleRes.role) {
-            setRole(roleRes.role);
-            localStorage.setItem('app_role', roleRes.role);
-          }
-        } catch {}
-
-        return { ok: true };
+      const roleRes = await postApi<any>('/api/auth/role', { session: sess });
+      if (roleRes?.ok && roleRes.role) {
+        setRole(roleRes.role);
+        try { localStorage.setItem('app_role', roleRes.role); } catch {}
+      } else {
+        // one retry — a single failed call used to leave an admin stuck as Operator until reload
+        setTimeout(() => { refreshRole(); }, 2500);
       }
-
-      return { ok: false, error: res?.error || 'Invalid credentials' };
-    } catch (err: any) {
-      return { ok: false, error: err?.message || 'Login failed' };
+      return { ok: true };
     }
-  }, []);
+    return { ok: false, error: res?.error || 'Invalid credentials' };
+  }, [refreshRole]);
 
   const logout = useCallback(() => {
-    setSession(null);
-    setUsername('');
-    setClientId('');
-    setClientName('');
-    setRole('none');
-    localStorage.removeItem('app_session');
-    localStorage.removeItem('app_username');
-    localStorage.removeItem('app_client_id');
-    localStorage.removeItem('app_client_name');
-    localStorage.removeItem('app_role');
-    localStorage.removeItem('app_panel_num');
+    wipe();
+    setSession(null); setUsername(''); setClientId(''); setClientName('');
+    setRole('none'); setPanelNum(1);
   }, []);
 
   return (
-    <AuthContext.Provider
-      value={{ session, username, clientId, clientName, panelNum, role, theme, isLoggedIn: !!session, login, logout, toggleTheme, refreshRole }}
-    >
+    <AuthContext.Provider value={{ session, username, clientId, clientName, panelNum, role, theme, isLoggedIn: !!session, login, logout, toggleTheme, refreshRole, adoptSession }}>
       {children}
     </AuthContext.Provider>
   );
