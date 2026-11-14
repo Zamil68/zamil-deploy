@@ -1,5 +1,8 @@
 export type PanelType = 'lamix' | 'zyron' | 'evs';
 export type UserRole = 'super' | 'admin' | 'moderator' | 'none';
+export type NotifType = 'info' | 'success' | 'warn' | 'emergency' | 'money' | 'system_alert';
+export type LbRange = 'today' | 'week' | 'month';
+
 export interface UserSession {
   session: string;
   username: string;
@@ -53,7 +56,7 @@ export interface LeaderboardUser {
   username: string;
   count: number;
   rank?: number;
-  prevRank?: number;
+  prevRank?: number | null;
   rankChange?: number;
   streak?: number;
   achievements?: LeaderboardAchievement[];
@@ -64,100 +67,55 @@ export interface LeaderboardTeam {
   team: string;
   label: string;
   count: number;
-  top?: { username: string; count: number };
+  top?: { username: string; count: number } | null;
 }
 
 export interface LeaderboardData {
   users: LeaderboardUser[];
-  // FIXED: 'me' now uses LeaderboardUser so it has access to streak, achievements, etc.
-  me?: LeaderboardUser | null; 
+  me?: LeaderboardUser | null;
   total: number;
   scope?: string;
   teamName?: string;
   mode?: string;
   secondary?: LeaderboardTeam[];
 }
-// === EOF: types/index.ts Leaderboard fix ===
+
 export interface ShippingQueueItem {
   id?: string;
   created_at: string;
+  processed_at?: string | null;
+  range_id?: string;
   range_name: string;
   username: string;
   qty: number;
   status: 'pending' | 'done' | 'failed';
-  result?: {
-    error?: string;
-    _error?: string;
-  };
+  result?: { error?: string; _error?: string; assigned?: number; instant?: boolean };
 }
 
 export interface SCCSystemData {
-  system: {
-    status: 'nominal' | 'warning' | 'critical';
-    score: number;
-  };
-  queue: {
-    size: number;
-    oldestMin: number;
-    etaMins: number;
-    avgDoneMin: number;
-  };
-  cdr: {
-    status?: 'live' | 'sleep' | 'dead';
-    alive: boolean;
-    perMin: number;
-    lagMin: number;
-    buckets: number[];
-  };
-  boats: {
-    active: number;
-    total: number;
-    list: Array<{
-      name: string;
-      ok: boolean;
-      agoMin: number | null;
-    }>;
-  };
-  load: {
-    perMin: number;
-    lastHour: number;
-    buckets: number[];
-    users?: number[];
-  };
-  users: {
-    online: number;
-    expected: number;
-    list: Array<{ u: string }>;
-  };
-  daily: {
-    today: number;
-    yesterday: number;
-    growthPct: number;
-  };
-  numbers: {
-    assigned: number;
-    total: number;
-    utilPct: number;
-  };
-  alerts: Array<{ message: string }>;
-  incidents: Array<{
-    id: string;
-    title: string;
-    message: string;
-    severity: 'info' | 'warning' | 'critical';
-    created_at: string;
-    type: string;
-  }>;
+  timestamp?: string;
+  system: { status: 'nominal' | 'healthy' | 'warning' | 'critical'; score: number; cdr?: string };
+  queue: { size: number; oldestMin: number; etaMins: number; avgDoneMin: number };
+  cdr: { status?: 'live' | 'sleep' | 'dead'; alive: boolean; perMin: number; lagMin: number | null; buckets: number[] };
+  boats: { active: number; total: number; list: Array<{ id?: number; name: string; ok: boolean; agoMin: number | null }> };
+  load: { perMin: number; lastHour: number; buckets: number[]; users?: number[] };
+  users: { online: number; expected: number; list: Array<{ u: string; ago?: number }> };
+  daily: { today: number; yesterday: number; growthPct: number };
+  numbers: { assigned: number; total: number; free?: number; utilPct: number; lastReconcile?: string };
+  alerts: Array<{ severity?: string; message: string }>;
+  incidents: Array<{ id: string; title: string; message: string; severity: 'info' | 'warning' | 'critical'; created_at: string; type: string }>;
+  otp?: { week: number; month: number; total: number };
+  weekBuckets?: number[];
+  teams?: Array<{ prefix: string; otpToday: number; top: { username: string; count: number } | null }>;
 }
 
 export interface NotificationItem {
   id: string;
-  type: 'info' | 'success' | 'warn' | 'money';
+  type: NotifType;
   title?: string;
   body: string;
   at: string;
   read: boolean;
-  readBy?: string[];
   by?: string;
 }
 
@@ -168,12 +126,7 @@ export interface AdminTeam {
   count: number;
   otpToday?: number;
   otpWeek?: number;
-  clients: Array<{
-    id: string;
-    username: string;
-    name?: string;
-    pinned?: boolean;
-  }>;
+  clients: Array<{ id: string; username: string; name?: string; pinned?: boolean }>;
 }
 
 export interface StatsOverview {
@@ -187,65 +140,46 @@ export interface StatsOverview {
   otpMonth: number;
   mostActiveRange?: string;
   mostActiveCount?: number;
-  countries: Array<{
-    country: string;
-    flag: string;
-    ranges: Array<{
-      range: string;
-      available: number;
-      total: number;
-    }>;
-  }>;
+  countries: Array<{ country: string; flag?: string; ranges: Array<{ range: string; available: number; total: number }> }>;
 }
 
+// `flag` is optional: /api/cli/analysis returns { name, range, n } — the UI derives the flag.
 export interface CliInsightsItem {
   cli: string;
   count: number;
   badge?: string;
   lastSeen?: string;
-  countries: Array<{
-    name: string;
-    flag: string;
-    range?: string;
-    n: number;
-  }>;
-  samples?: Array<{
-    t: string;
-    text: string;
-  }>;
+  countries: Array<{ name: string; flag?: string; range?: string; n: number }>;
+  samples?: Array<{ t: string; text: string }>;
 }
 
 export interface CliStats {
   totalSms: number;
   totalCli: number;
-  topCountry?: {
-    flag: string;
-    name: string;
-  };
-  topCountries?: Array<{
-    flag: string;
-    name: string;
-    n: number;
-  }>;
+  topCountry?: { name: string; n?: number; flag?: string } | null;
+  topCountries?: Array<{ name: string; n: number; flag?: string }>;
 }
 
-export interface BulkRangeOption {
-  range_id: string;
-  name: string;
-  unassigned: number;
-}
+export interface BulkRangeOption { range_id: string; name: string; unassigned: number }
 
 export interface CrushOption {
   range_name: string;
   range_id?: string;
   count: number;
+  active?: number;
+  users?: number;
+  pool_assigned?: number;
+  pool_free?: number;
   gone?: boolean;
+  live?: boolean;
 }
 
 export interface CrushSuggestion {
   id: number;
   range_name: string;
   rows_alive: number;
+  status?: string;
+  source?: 'vanished' | 'returned' | 'auto' | 'manual';
 }
 
 export interface FleetRangeDbItem {
@@ -258,7 +192,7 @@ export interface FleetRangeDbItem {
   freeInPool: number;
   inGateway: boolean;
   activeUsersCount: number;
-  lastOtpAt?: string;
+  lastOtpAt?: string | null;
 }
 
 export interface UserRestrictionStatus {
@@ -270,23 +204,4 @@ export interface UserRestrictionStatus {
   dailyCountriesLimit: number;
   maxPerAlloc: number;
   burstQuotaAllowance: number;
-}
-
-export interface LeaderboardAchievement {
-  id: string;
-  type: 'streak' | 'champion' | 'rising' | 'top3';
-  label: string;
-  icon: string;
-  color: string;
-}
-
-export interface LeaderboardUser {
-  username: string;
-  count: number;
-  rank?: number;
-  prevRank?: number;
-  rankChange?: number;
-  streak?: number;
-  achievements?: LeaderboardAchievement[];
-  percentile?: number;
 }
