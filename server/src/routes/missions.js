@@ -59,7 +59,8 @@ R.post('/api/missions/rewind', A.verify, async (req, res) => {
   ok(res, { rewound_to: iso });
 });
 
-R.get('/api/missions/status', async (req, res) => {
+R.get('/api/missions/status', A.verify, async (req, res) => {
+  if ((await A.getRole(req.user.username)) !== 'super') return res.status(403).json({ ok: false, error: 'Super admin only' });
   const st = await q("SELECT last_time FROM cdr_state WHERE id=1");
   const cnt = await q("SELECT COUNT(*)::int c FROM sms_cdr WHERE time >= " + "(SELECT date_trunc('day', NOW() AT TIME ZONE 'UTC'))");
   const last = st.rows[0] ? st.rows[0].last_time : null;
