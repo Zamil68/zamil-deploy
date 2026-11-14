@@ -22,6 +22,7 @@ export const NumbersView: React.FC<NumbersViewProps> = ({ range, numbers, liveTi
   const [numberDetailsModal, setNumberDetailsModal] = useState<{ number: string; count: number; recent: any[] } | null>(null);
   const [isCopyingAll, setIsCopyingAll] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [detailsBusy, setDetailsBusy] = useState<string | null>(null);
   // ── FIX: per-number live OTP counters (start on copy, max 30) ──
   const otpStart = useMemo(() => { try { return JSON.parse(localStorage.getItem('zamil_numotp_start') || '{}'); } catch { return {}; } }, [liveTick, copiedNumbers]);
   const otpCount = useMemo(() => { try { return JSON.parse(localStorage.getItem('zamil_numotp_count') || '{}'); } catch { return {}; } }, [liveTick, copiedNumbers]);
@@ -35,7 +36,7 @@ export const NumbersView: React.FC<NumbersViewProps> = ({ range, numbers, liveTi
       localStorage.setItem('zamil_numotp_count', JSON.stringify(c));
     } catch {}
   };
-  const hasTerritorySplit = useMemo(() => numbers.some((n) => n.includes('970') || n.includes('972')), [numbers]);
+  const hasTerritorySplit = useMemo(() => numbers.some((n) => { const p = stripPlus(n); return p.startsWith('970') || p.startsWith('972'); }), [numbers]);
   const filteredNumbers = useMemo(() => {
     const q = searchQuery.trim();
     return numbers.filter((num) => {
@@ -73,15 +74,18 @@ export const NumbersView: React.FC<NumbersViewProps> = ({ range, numbers, liveTi
         return next;
       });
       startCounter(filteredNumbers); // FIX: all copied numbers start counting
+      postApi('/api/numbers/mark-used-bulk', { numbers: filteredNumbers, rangeId: range.id, rangeTitle: range.title }).catch(() => {});
       showToast(`✓ ${listToCopy.length} copied`, 'success');
     } catch { showToast('Copy failed', 'error'); }
     finally { setTimeout(() => setIsCopyingAll(false), 1200); }
   };
   const openNumberDetails = async (rawNum: string) => {
-    try {
-      const res = await postApi<any>('/api/number-smscount', { number: rawNum });
-      if (res && res.ok) setNumberDetailsModal({ number: rawNum, count: res.count || 0, recent: res.recent || [] });
-    } catch { showToast('Details failed', 'error'); }
+    if (detailsBusy) return;
+    setDetailsBusy(rawNum);
+    const res = await postApi<any>('/api/number-smscount', { number: rawNum });
+    setDetailsBusy(null);
+    if (res?.ok) setNumberDetailsModal({ number: rawNum, count: res.count || 0, recent: Array.isArray(res.recent) ? res.recent : [] });
+    else showToast(res?.error || 'Details unavailable for this number', 'error');
   };
   const rangeCountry = splitRangeName(range.title).country;
   return (
@@ -160,7 +164,7 @@ export const NumbersView: React.FC<NumbersViewProps> = ({ range, numbers, liveTi
                 {isCopied && <span className="px-1.5 py-0.2 rounded text-[8px] font-bold uppercase bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/20">USED</span>}
                 <button type="button" onClick={(e) => { e.stopPropagation(); openNumberDetails(rawNum); }}
                   className="p-1 rounded text-slate-400 hover:text-cyan-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer" title="SMS stats">
-                  <PhoneCall className="w-3 h-3" />
+                  {detailsBusy === rawNum ? <RefreshCw className="w-3 h-3 animate-spin text-cyan-500" /> : <PhoneCall className="w-3 h-3" />}
                 </button>
               </div>
             </div>
