@@ -5,7 +5,7 @@ import { useToast } from '../context/ToastContext';
 import { postApi } from '../services/api';
 import { PageHead, IconBtn, Card, Empty } from './Ui';
 import { Bell, CheckCheck, RefreshCw, Send, Info, Check, AlertTriangle, DollarSign, Siren, Trash2, X, MessageSquarePlus } from 'lucide-react';
-interface NotificationsViewProps { notifications: NotificationItem[]; onBack: () => void; onRefresh: () => void; }
+interface NotificationsViewProps { notifications: NotificationItem[]; onBack: () => void; onRefresh: () => void | Promise<void>; }
 const TYPE_META: Record<string, { icon: any; chip: string; label: string }> = {
   info: { icon: Info, chip: 'bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/25', label: 'Normal' },
   success: { icon: Check, chip: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/25', label: 'Success' },
@@ -27,7 +27,7 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({ notificati
   const [busyRefresh, setBusyRefresh] = useState(false);
   useEffect(() => { onRefresh(); }, []);
   const unread = notifications.filter((n) => !n.read);
-  const refresh = async () => { setBusyRefresh(true); onRefresh(); setTimeout(() => setBusyRefresh(false), 600); };
+  const refresh = async () => { setBusyRefresh(true); try { await onRefresh(); } finally { setBusyRefresh(false); } };
   const markAll = async () => {
     if (!unread.length) { showToast('Nothing unread', 'info'); return; }
     await postApi('/api/notifs/mark-read', { ids: unread.map((n) => n.id) });
@@ -122,7 +122,7 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({ notificati
                   className="p-1 rounded-md text-slate-300 dark:text-slate-600 hover:text-slate-600 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer">
                   <X className="w-3.5 h-3.5" />
                 </button>
-                {role === 'super' && (
+                {(role === 'super' || role === 'admin') && (
                   <button type="button" onClick={() => del(n.id)} title="Delete for everyone"
                     className="p-1 rounded-md text-slate-300 dark:text-slate-600 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors cursor-pointer">
                     <Trash2 className="w-3.5 h-3.5" />
