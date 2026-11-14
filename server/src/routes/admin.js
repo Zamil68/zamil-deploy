@@ -5,6 +5,7 @@ const C = require('../config');
 const lx = require('../lamix');
 const sse = require('../sse');
 const L = require('../loops');
+const CL = require('../clients');
 const ok = (res, d = {}) => res.json({ ok: true, ...d });
 const countryOf = t => { const m = String(t || '').match(/^(.+?)[\s-](?:LX|MX|RX|DC)\b/i) || String(t || '').match(/^([A-Za-z\s]+?)\d/); return (m && m[1] ? m[1] : String(t || '')).trim(); };
 async function needAdmin(req, res){ const r = await A.getRole(req.user.username); if (!A.isAdminish(r)) { res.status(403).json({ ok: false, error: 'Admins only' }); return false; } return true; }
@@ -24,7 +25,7 @@ R.post('/api/admin/admins', A.verify, async (req, res) => {
 R.post('/api/admin/promote', A.verify, async (req, res) => {
   if (!await needAdmin(req, res)) return;
   const role = await A.getRole(req.user.username);
-  if (role !== 'super' && role !== 'admin') return res.status(403).json({ ok: false, error: 'Only super/admin can manage roles' });
+  if (role !== 'super') return res.status(403).json({ ok: false, error: 'Super admin only — roles are a super-admin privilege.' });
   const t = String(req.body.username || '').trim().toLowerCase();
   if (!t) return res.status(400).json({ ok: false, error: 'Username required' });
   if (t === C.SUPER_ADMIN) return res.status(400).json({ ok: false, error: 'Cannot modify super admin' });
@@ -36,7 +37,7 @@ R.post('/api/admin/promote', A.verify, async (req, res) => {
 R.post('/api/admin/demote', A.verify, async (req, res) => {
   if (!await needAdmin(req, res)) return;
   const role = await A.getRole(req.user.username);
-  if (role !== 'super' && role !== 'admin') return res.status(403).json({ ok: false, error: 'Only super/admin can manage roles' });
+  if (role !== 'super') return res.status(403).json({ ok: false, error: 'Super admin only — roles are a super-admin privilege.' });
   const t = String(req.body.username || '').trim().toLowerCase();
   if (!t) return res.status(400).json({ ok: false, error: 'Username required' });
   if (t === C.SUPER_ADMIN) return res.status(400).json({ ok: false, error: 'Cannot modify super admin' });
@@ -68,8 +69,7 @@ R.post('/api/admin/del-prefix', A.verify, async (req, res) => {
 
 R.post('/api/admin/my-clients', A.verify, async (req, res) => {
   if (!await needAdmin(req, res)) return;
-  const data = await lx.get('/clients', { limit: 500 });
-  let allClients = ((data.records || data.clients || []).map(c => ({ id: c.username, username: c.username, name: c.name || '' })));
+  let allClients = (await CL.getClients()).map(c => ({ ...c }));
   try {
     const dbf = await q("SELECT DISTINCT client AS username FROM user_numbers WHERE client IS NOT NULL AND client <> '' ORDER BY 1");
     const have = new Set(allClients.map(c => String(c.username).toLowerCase()));
@@ -119,8 +119,7 @@ R.post('/api/admin/pin-client', A.verify, async (req, res) => {
   let found = !!db.rows[0];
   if (!found) { const led = await q("SELECT DISTINCT client FROM user_numbers WHERE LOWER(client)=$1 LIMIT 1", [username]); found = !!led.rows[0]; }
   if (!found) {
-    const data = await lx.get('/clients', { limit: 500 });
-    const cls = (data.records || data.clients || []);
+    const cls = await CL.getClients();
     found = cls.some(c => String(c.username || '').toLowerCase() === username || String(c.name || '').toLowerCase() === username);
   }
   if (!found) return res.status(404).json({ ok: false, error: 'User not found in DB or LaMix — cannot pin.' });
@@ -134,15 +133,19 @@ R.post('/api/admin/unpin-client', A.verify, async (req, res) => {
   ok(res, { message: 'unpinned' });
 });
 
+// UPDATE, not DELETE: the old wipe also destroyed dor_allowed, client_id and
+// client_name, silently revoking DB-granted DOR access on every password reset.
 R.post('/api/admin/reset-credentials', A.verify, async (req, res) => {
   if (!await needAdmin(req, res)) return;
   const un = String(req.body.username || '').trim().toLowerCase();
   if (!un) return res.status(400).json({ ok: false, error: 'username required' });
   if (un === C.SUPER_ADMIN) return res.status(400).json({ ok: false, error: 'Cannot reset super admin' });
-  const d = await q("DELETE FROM user_creds WHERE username=$1", [un]);
-  if (!d.rowCount) return res.status(404).json({ ok: false, error: 'No password row found for ' + un });
+  const d = await q("UPDATE user_creds SET pass_hash=NULL, recovery_hash=NULL, pwd_changed_at=NOW(), updated_at=NOW() WHERE username=$1 AND pass_hash IS NOT NULL", [un]);
+  if (!d.rowCount) return res.status(404).json({ ok: false, error: 'No active password found for ' + un });
+  A.invalidatePwdCache(un);
   await q("INSERT INTO app_notifs (target,type,title,body,created_by) VALUES ($1,'warn','🔑 Password reset by admin','Your password was wiped by " + req.user.username + ". Set a new one on next login.',$2)", [un, req.user.username]);
-  ok(res, { reset: true, username: un, message: 'Credentials wiped — they must activate on next login' });
+  sse.pushUsers([un], 'notif');
+  ok(res, { reset: true, username: un, message: 'Credentials wiped — DOR/CLI access preserved' });
 });
 
 R.post('/api/admin/reset-password', A.verify, async (req, res) => {
@@ -175,15 +178,19 @@ R.post('/api/admin/limit-status', A.verify, async (req, res) => {
   });
 });
 
+// The +3/day cap counted alloc_events rows with qty=-1 that were never written,
+// so it never fired. Grants are now logged in free_try_log (migration 001).
 R.post('/api/admin/free-try', A.verify, async (req, res) => {
   if (!await needAdmin(req, res)) return;
-  const target = String(req.body.username || '').trim().toLowerCase(), rowId = req.body.rowId;
-  if (!target || rowId == null) return res.status(400).json({ ok: false, error: 'username and rowId required' });
-  const granted = await q("SELECT COUNT(*)::int c FROM alloc_events WHERE username=$1 AND created_at >= " + PKT_DAY + " AND qty=-1", [target]);
-  if (granted.rows[0].c >= 3) return res.status(400).json({ ok: false, error: 'Max +3 tries per user per day.' });
+  const target = String(req.body.username || '').trim().toLowerCase();
+  const rowId = parseInt(req.body.rowId, 10);
+  if (!target || !rowId) return res.status(400).json({ ok: false, error: 'username and rowId required' });
+  const g = await q("SELECT COUNT(*)::int c FROM free_try_log WHERE username=$1 AND created_at >= " + PKT_DAY, [target]);
+  if (g.rows[0].c >= 3) return res.status(400).json({ ok: false, error: 'Max +3 tries per user per day (' + g.rows[0].c + '/3 used).' });
   const d = await q("DELETE FROM alloc_events WHERE id=$1 AND username=$2", [rowId, target]);
   if (!d.rowCount) return res.status(404).json({ ok: false, error: 'Row not found.' });
-  ok(res, { message: 'Freed 1 try for ' + target });
+  await q("INSERT INTO free_try_log (username,granted_by) VALUES ($1,$2)", [target, req.user.username]);
+  ok(res, { message: 'Freed 1 try for ' + target, grantedToday: g.rows[0].c + 1, remaining: 2 - g.rows[0].c });
 });
 
 R.post('/api/admin/limits-get', A.verify, async (req, res) => {
@@ -376,8 +383,7 @@ R.post('/api/admin/team-report', A.verify, async (req, res) => {
   rawWk.rows.forEach(r => { wMap[r.client] = (wMap[r.client] || 0) + r.c; });
   today.rows.forEach(r => { wMap[r.client] = (wMap[r.client] || 0) + r.c; });
   const weekRows = Object.entries(wMap).map(([client, c]) => ({ client, c }));
-  const data = await lx.get('/clients', { limit: 500 });
-  const clients = (data.records || data.clients || []).map(c => c.username);
+  const clients = (await CL.getClients()).map(c => c.username);
   const tally = rows => {
     const m = {};
     rows.forEach(r => { const k = resolveTeam(String(r.client).toLowerCase(), all, pm) || '__none__'; m[k] = (m[k] || 0) + r.c; });
