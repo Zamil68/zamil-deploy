@@ -11,7 +11,7 @@ export const DORView: React.FC<DORViewProps> = ({ messages, onRefresh, isLoading
   const filtered = useMemo(() => {
     const s = q.toLowerCase().trim();
     if (!s) return messages;
-    return messages.filter((m) => (m.client || '').toLowerCase().includes(s) || m.number.includes(s) || m.cli.toLowerCase().includes(s) || m.message.toLowerCase().includes(s));
+    return messages.filter((m) => String(m.client || '').toLowerCase().includes(s) || String(m.number || '').includes(s) || String(m.cli || '').toLowerCase().includes(s) || String(m.message || '').toLowerCase().includes(s));
   }, [messages, q]);
   const visible = useMemo(() => (limit === '0' ? filtered : filtered.slice(0, parseInt(limit, 10))), [filtered, limit]);
   return (
