@@ -197,6 +197,22 @@ R.post('/api/numbers/mark-used', A.verify, async (req, res) => {
   ok(res, { marked: true });
 });
 
+// Today's OTP count per number (00:00 UTC / 05:00 PKT boundary). Ownership enforced.
+R.post('/api/numbers/otp-today', A.verify, async (req, res) => {
+  const raw = Array.isArray(req.body.numbers) ? req.body.numbers : [];
+  const nums = [...new Set(raw.map(x => String(x || '').replace(/[^0-9+]/g, '')).filter(Boolean))].slice(0, 1000);
+  const day = new Date().toISOString().slice(0, 10);
+  if (!nums.length) return ok(res, { day, cap: 30, counts: {} });
+  const me = req.user.username, alt = req.user.clientName || me;
+  const own = await q("SELECT number FROM user_numbers WHERE number = ANY($1) AND (LOWER(client)=LOWER($2) OR LOWER(client)=LOWER($3))", [nums, me, alt]);
+  let mine = own.rows.map(r => r.number);
+  if (!mine.length && A.isAdminish(await A.getRole(me))) mine = nums;
+  if (!mine.length) return ok(res, { day, cap: 30, counts: {} });
+  const r = await q("SELECT number, COUNT(*)::int c FROM sms_cdr WHERE time >= " + PKT_DAY + " AND number = ANY($1) GROUP BY 1", [mine]);
+  const counts = {};
+  r.rows.forEach(x => { counts[x.number] = x.c; });
+  ok(res, { day, cap: 30, counts });
+});
 R.post('/api/numbers/mark-used-bulk', A.verify, async (req, res) => {
   const raw = Array.isArray(req.body.numbers) ? req.body.numbers : [];
   const nums = [...new Set(raw.map(x => String(x || '').replace(/[^0-9+]/g, '')).filter(Boolean))].slice(0, 2000);
