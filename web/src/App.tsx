@@ -18,6 +18,7 @@ import { ChangePasswordView } from './components/ChangePasswordView';
 import { LiveOtpFloatingCard } from './components/LiveOtpFloatingCard';
 import { LoginView } from './components/LoginView';
 import { postApi } from './services/api';
+import { bumpOtpCounts, ensureOtpDay, rolloverOtpDay, msUntilUtcMidnight } from './utils/otpCounter';
 import type { RangeItem, SmsMessage, LeaderboardData, NotificationItem } from './types';
 
 type AppSubPage = 'dashboard' | 'admin' | 'cli' | 'notifications' | 'password';
@@ -31,7 +32,6 @@ const RANGES_THROTTLE_MS = 8000;
 const WINDOW_THROTTLE_MS = 120000;
 const NOTIF_POLL_MS = 40000;
 const SEEN_CAP = 800;
-const OTP_PER_NUMBER_CAP = 30;
 
 const smsKey = (m: SmsMessage) => `${m.number}|${m.cli}|${m.time}`;
 const EMPTY_LB: LeaderboardData = { users: [], total: 0 };
@@ -193,21 +193,9 @@ function DashboardContent() {
         const f = fresh[0];
         setLatestOtpAlert({ number: f.number, cli: f.cli, message: f.message, time: f.time, burst: fresh.length });
       }
-      try {
-        const sMap = JSON.parse(localStorage.getItem('zamil_numotp_start') || '{}');
-        const cMap = JSON.parse(localStorage.getItem('zamil_numotp_count') || '{}');
-        let changed = false;
-        fresh.forEach((m) => {
-          if (sMap[m.number] != null && (cMap[m.number] || 0) < OTP_PER_NUMBER_CAP) {
-            cMap[m.number] = (cMap[m.number] || 0) + 1;
-            changed = true;
-          }
-        });
-        if (changed) {
-          localStorage.setItem('zamil_numotp_count', JSON.stringify(cMap));
-          setNumOtpTick((t) => t + 1);
-        }
-      } catch {}
+      // Daily per-number OTP counters — driven ONLY by received OTPs, never by copying.
+      // Day-keyed store auto-resets at 00:00 UTC = 05:00 PKT.
+      if (bumpOtpCounts(fresh.map((m) => m.number))) setNumOtpTick((t) => t + 1);
     }
     // bound the dedupe set (was growing forever)
     if (seen.size > SEEN_CAP) seenSmsKeysRef.current = new Set(rec.map(smsKey));
@@ -445,6 +433,41 @@ function DashboardContent() {
     requestRangesFetch(true);
     if (selectedRange) fetchNumbers(selectedRange);
   }, [live.crushV, isLoggedIn, requestRangesFetch, selectedRange, fetchNumbers]);
+
+  // __ZAMIL_OTP_DAILY__ — counters roll over at 00:00 UTC (05:00 PKT).
+  // ONLY counters reset. USED marks, ownership and number status are untouched.
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    if (ensureOtpDay().rolled) setNumOtpTick((v) => v + 1);
+    let t = 0;
+    const roll = () => {
+      rolloverOtpDay();
+      setNumOtpTick((v) => v + 1);
+      setTodaySmsCount(0);
+      setSmsMessages([]);
+      fetchSmsStream();
+      refreshWindowCounts(true);
+      t = window.setTimeout(roll, msUntilUtcMidnight());
+    };
+    t = window.setTimeout(roll, msUntilUtcMidnight());
+    const onVis = () => {
+      if (document.hidden) return;
+      if (ensureOtpDay().rolled) {
+        setNumOtpTick((v) => v + 1);
+        setTodaySmsCount(0);
+        setSmsMessages([]);
+        fetchSmsStream();
+        refreshWindowCounts(true);
+      }
+    };
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('focus', onVis);
+    return () => {
+      clearTimeout(t);
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('focus', onVis);
+    };
+  }, [isLoggedIn, fetchSmsStream, refreshWindowCounts]);
 
   const dismissOtp = useCallback(() => setLatestOtpAlert(null), []);
 
