@@ -1,6 +1,7 @@
 const { q } = require('./db');
 const lx = require('./lamix');
 const L = require('./loops');
+const CT = require('./counters'); // __ZAMIL_COUNTERS_V1__
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const G = global;
 
@@ -50,6 +51,7 @@ function announce(affected, wrote) {
   if (!wrote) return;
   G.__cdrLast = Date.now();
   L.invalidateNc();
+  CT.refreshCounters();
   if (affected.size) L.pushSmsTo([...affected]);
 }
 
@@ -62,6 +64,7 @@ async function realtime() {
     const affected = new Set();
     try {
       const ds = dayStart();
+      if (G.__otpDay !== ds) { G.__otpDay = ds; CT.refreshCounters(true); } // 00:00 UTC reset
       if (!cur) {
         const st = await q("SELECT last_time FROM cdr_state WHERE id=1");
         cur = st.rows[0] && st.rows[0].last_time ? normT(st.rows[0].last_time) : ds;
