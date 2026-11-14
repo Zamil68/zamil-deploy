@@ -12,7 +12,7 @@ const normT = s => {
   return v.replace('T', ' ').replace(/\.\d+/, '').replace(/(Z|[+-]\d{2}:?\d{2})$/, '').trim();
 };
 const G = global;
-G.__cdrHb = 0; G.__cdrLast = 0; G.__syncHb = 0; G.__reconHb = 0; G.__queueHb = 0; G.__clientsHb = 0;
+G.__cdrHb = 0; G.__cdrLast = 0; G.__cdrOkAt = 0; G.__syncHb = 0; G.__reconHb = 0; G.__queueHb = 0; G.__clientsHb = 0;
 G.__reconState = { status: 'idle', fetched: 0, expected: 0, remaining: 0, etaSecs: 0 };
 G.__reconCurve = []; G.__reconDue = 0; G.__reconLast = 0;
 
@@ -24,6 +24,14 @@ async function ncMap(){
   return _nc.map;
 }
 const invalidateNc = () => { _nc.ts = 0; };
+
+// Numbers released or reassigned since an SMS arrived are absent from the assigned
+// pool map. Without this fallback their OTPs were attributed to nobody and lost.
+async function ownerFallback(nums) {
+  if (!nums.length) return new Map();
+  const r = await q("SELECT number, client FROM user_numbers WHERE number = ANY($1) AND client IS NOT NULL AND client<>''", [nums]);
+  return new Map(r.rows.map(x => [x.number, x.client]));
+}
 
 async function smsPayloadFor(username, clientName){
   const alt = clientName || username;
@@ -38,42 +46,7 @@ async function pushSmsTo(users){
   }
 }
 
-// ── BOAT 1: CDR stream ──
-async function cdrLoop(){
-  while (true) {
-    G.__cdrHb = Date.now();
-    try {
-      const st = await q("SELECT last_time FROM cdr_state WHERE id=1");
-      let last = st.rows[0] && st.rows[0].last_time ? normT(st.rows[0].last_time) : normT(new Date(Date.now() - 120000).toISOString());
-      let pages = 0, any = false; const affected = new Set();
-      while (pages < 12) {
-        const d = await lx.get('/cdrs', { from: last, limit: 500 });
-        if (d._error || d._rateLimited) break;
-        const recs = d.records || [];
-        if (!recs.length) break;
-        const m = await ncMap();
-        const rows = recs.map(r => {
-          const cli = String(r.client || m.get(String(r.number || '')) || '');
-          if (cli) affected.add(cli);
-          return { time: normT(r.time), number: String(r.number || ''), cli: String(r.cli || ''), client: cli || null,
-            content: r.content || '', range: r.range || '', range_prefix: r.rangePrefix || '', currency: r.currency || null,
-            payout: r.payout != null ? r.payout : null, client_payout: r.clientPayout != null ? r.clientPayout : null,
-            status: r.status || null, cleared_at: r.clearedAt ? normT(r.clearedAt) : null };
-        });
-        await q("SELECT ingest_cdr($1)", [JSON.stringify(rows)]);
-        rows.forEach(r => { if (r.time > last) last = r.time; });
-        any = true; pages++;
-        if (recs.length < 500) break;
-      }
-      if (any) {
-        await q("INSERT INTO cdr_state (id,last_time) VALUES (1,$1) ON CONFLICT (id) DO UPDATE SET last_time=$1", [last]);
-        G.__cdrLast = Date.now(); invalidateNc();
-        if (affected.size) pushSmsTo([...affected]);
-      } else G.__cdrLast = G.__cdrLast || Date.now();
-    } catch (e) { console.error('[cdr]', e.message); }
-    await sleep(1600);
-  }
-}
+// ── BOAT 1: CDR stream → moved to ./cdr.js (realtime + day-sweep lanes) ──
 
 // ── BOAT 2: ranges sync ──
 // FIX (glitch): broadcasts fire ONLY when the pool signature actually changed.
@@ -137,7 +110,7 @@ async function reconcileLoop(){
       const curve = [];
       try {
         const exp = await q("SELECT COUNT(*)::int e FROM pool_numbers WHERE status IN ('free','assigned')");
-        G.__reconState = { status: 'running', fetched: 0, expected: exp.rows[0].e, remaining: exp.rows[0].e, etaSecs: 60, startedAt: t0ms };
+        G.__reconState = { status: 'running', fetched: 0, expected: exp.rows[0].e, remaining: exp.rows[0].e, etaSecs: 60, etaAt: Date.now(), startedAt: t0ms };
         while (pages < 1200) {
           const d = await lx.get('/numbers', after ? { limit: 500, after } : { limit: 500 });
           if (!d || d._error || d._rateLimited) break;
@@ -152,7 +125,7 @@ async function reconcileLoop(){
           }
           pages++; curve.push({ t: Date.now(), f: seen }); if (curve.length > 400) curve.shift();
           G.__reconHb = Date.now();
-          G.__reconState = { status: 'running', fetched: seen, expected: Math.max(exp.rows[0].e, seen), remaining: Math.max(0, exp.rows[0].e - seen), etaSecs: Math.max(5, Math.round((Math.max(0, exp.rows[0].e - seen) / 500) * (60 / 38)) + 2), startedAt: t0ms };
+          G.__reconState = { status: 'running', fetched: seen, expected: Math.max(exp.rows[0].e, seen), remaining: Math.max(0, exp.rows[0].e - seen), etaSecs: Math.max(5, Math.round((Math.max(0, exp.rows[0].e - seen) / 500) * (60 / 38)) + 2), etaAt: Date.now(), startedAt: t0ms };
           G.__reconCurve = curve;
           after = d.nextCursor || null;
           if (!after) { complete = true; break; }
@@ -179,28 +152,54 @@ async function reconcileLoop(){
 }
 
 // ── BOAT 4: allocation queue worker ──
+const ctryOf = t => { const m = String(t || '').match(/^(.+?)[\s-](?:LX|MX|RX|DC)\b/i) || String(t || '').match(/^([A-Za-z\s]+?)\d/); return (m && m[1] ? m[1] : String(t || '')).trim(); };
+
+// A permanently-failing batch used to stay 'pending' forever and re-hit LaMix every
+// 1.5s in the FAST lane, starving every real user allocation behind it.
+async function failBatch(row, err) {
+  const msg = String(err || 'unknown').slice(0, 200);
+  await q("UPDATE alloc_queue SET status='failed', result=$2, last_error=$3, processed_at=NOW() WHERE id=$1", [row.id, JSON.stringify({ error: msg }), msg]);
+  const owner = String(row.client || row.username || '').toLowerCase();
+  // User bookings consumed daily quota up front — refund it. Admin bulk never wrote events.
+  if (owner && String(row.username || '').toLowerCase() === owner) {
+    await q("INSERT INTO alloc_events (username,country,range_id,range_title,qty) VALUES ($1,$2,$3,$4,$5)",
+      [owner, ctryOf(row.range_name), row.range_id || '', row.range_name || '', -(parseInt(row.qty, 10) || 0)]).catch(() => {});
+  }
+  await q("INSERT INTO app_notifs (target,type,title,body,created_by) VALUES ($1,'warn','⛵ Dispatch failed',$2,'system')",
+    [owner, (row.range_name || 'Batch') + ' ×' + row.qty + ' could not be delivered: ' + msg + '. Your daily quota was refunded.']).catch(() => {});
+  if (owner) sse.pushUsers([owner], 'notif');
+  sse.broadcast('numbers');
+}
+
 async function queueWorker(){
+  const MAX_ATTEMPTS = 8;
   while (true) {
     G.__queueHb = Date.now();
     try {
-      const b = await q("SELECT * FROM alloc_queue WHERE status='pending' ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED");
+      // Reclaim reservations abandoned by a crashed request or a killed process.
+      await q("UPDATE pool_numbers SET status='free', updated_at=NOW() WHERE status='reserved' AND updated_at < NOW() - interval '5 minutes'");
+      const b = await q("SELECT * FROM alloc_queue WHERE status='pending' AND attempts < $1 ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED", [MAX_ATTEMPTS]);
       const row = b.rows[0];
       if (row) {
+        const tries = (parseInt(row.attempts, 10) || 0) + 1;
+        await q("UPDATE alloc_queue SET attempts=$2 WHERE id=$1", [row.id, tries]);
         const un = row.client || row.username || '';
         const rid = row.range_id || '', rname = row.range_name || '';
         const qty = parseInt(row.qty, 10) || 0;
         const lock = await q("SELECT number FROM pool_numbers WHERE range_id=$1 AND status='free' ORDER BY number LIMIT $2 FOR UPDATE SKIP LOCKED", [rid, qty]);
         const nums = lock.rows.map(r => r.number);
         if (!nums.length) {
-          await q("UPDATE alloc_queue SET status='failed', result=$2, processed_at=NOW() WHERE id=$1", [row.id, JSON.stringify({ error: 'no free numbers in range' })]);
+          await failBatch(row, 'no free numbers in range');
         } else {
           const lr = await lx.post('/numbers/assign', { client: un, numbers: nums, clientPayoutRate: String(row.payout_rate || 0.01) }, 'fast');
           if (lr && (lr._error || lr._rateLimited)) {
-            await q("UPDATE alloc_queue SET result=$2 WHERE id=$1", [row.id, JSON.stringify({ error: lr._error || 'rate limited, retrying' })]);
+            const err = String(lr._error || 'rate limited');
+            if (tries >= MAX_ATTEMPTS) await failBatch(row, err);
+            else await q("UPDATE alloc_queue SET last_error=$2 WHERE id=$1", [row.id, err.slice(0, 200)]);
           } else {
             await q("UPDATE pool_numbers SET status='assigned', client_id=$1, assigned_at=NOW(), updated_at=NOW() WHERE number = ANY($2)", [un, nums]);
             await q("INSERT INTO user_numbers (number,client,range_id,range_name,status,updated_at) SELECT n,$1,$2,$3,'active',NOW() FROM UNNEST($4::text[]) n ON CONFLICT (number) DO UPDATE SET client=EXCLUDED.client, status='active', range_name=EXCLUDED.range_name, updated_at=NOW()", [un, rid, rname, nums]);
-            await q("UPDATE alloc_queue SET status='done', result=$2, processed_at=NOW() WHERE id=$1", [row.id, JSON.stringify({ assigned: nums.length })]);
+            await q("UPDATE alloc_queue SET status='done', result=$2, last_error=NULL, processed_at=NOW() WHERE id=$1", [row.id, JSON.stringify({ assigned: nums.length })]);
             invalidateNc(); sse.broadcast('numbers'); sse.broadcast('ranges');
           }
         }
@@ -270,7 +269,7 @@ async function refreshRange(rangeId){
   return { pages, seen };
 }
 
-function start(){ cdrLoop(); syncLoop(); reconcileLoop(); queueWorker(); clientsLoop(); rangeRotLoop(); console.log('[loops] daemons LIVE (cdr+sync+reconcile+queue+clients+rot)'); }
+function start(){ require('./cdr').start(); syncLoop(); reconcileLoop(); queueWorker(); clientsLoop(); rangeRotLoop(); console.log('[loops] daemons LIVE (cdr+sync+reconcile+queue+clients+rot)'); }
 module.exports = { start, ncMap, invalidateNc, maybeRangeRefresh, pushSmsTo, smsPayloadFor, refreshRange, dailyTruncationLoop };
 
 // ── BOAT 6: CDR rollover (count per user → otp_daily, then wipe raw rows) ──
@@ -284,7 +283,9 @@ async function dailyTruncationLoop(){
         const cl = await pool.connect();
         try {
           await cl.query('BEGIN');
+          await cl.query("SET LOCAL statement_timeout='10min'");
           await cl.query("INSERT INTO otp_daily (username, day, count) SELECT LOWER(client), date_trunc('day', time)::date, COUNT(*)::int FROM sms_cdr WHERE time < $1 AND client IS NOT NULL AND client <> '' GROUP BY 1, 2 ON CONFLICT (username, day) DO UPDATE SET count = otp_daily.count + EXCLUDED.count", [B]);
+          await cl.query("INSERT INTO otp_number_daily (number, day, client, count) SELECT number, date_trunc('day', time)::date, MAX(LOWER(client)), COUNT(*)::int FROM sms_cdr WHERE time < $1 AND number <> '' GROUP BY 1,2 ON CONFLICT (number, day) DO UPDATE SET count = otp_number_daily.count + EXCLUDED.count, client = COALESCE(EXCLUDED.client, otp_number_daily.client)", [B]);
           const del = await cl.query("DELETE FROM sms_cdr WHERE time < $1", [B]);
           await cl.query('COMMIT');
           console.log('[retention] rolled up + purged', del.rowCount, 'raw CDR rows');
