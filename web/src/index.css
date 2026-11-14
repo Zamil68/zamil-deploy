@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @custom-variant dark (&:where(.dark, .dark *));
+
 :root {
   --bg:#f4f6fa; --card:#ffffff; --line:#e6e9f0; --ink:#0b1220; --mut:#7c8698;
   --pri:#06b6d4; --pri2:#4f46e5; --ok:#10b981; --warn:#f59e0b; --bad:#f43f5e;
@@ -12,13 +13,17 @@
   --bg:#0a0f1e; --card:#151c30; --line:#27334e; --ink:#eef2fb; --mut:#9aa6bd;
   color-scheme: dark;
 }
+
 *, *::before, *::after { box-sizing: border-box; }
 html, body { width:100%; max-width:100vw; overflow-x:hidden; margin:0; padding:0; }
-body { font-family:var(--font-sans); background:var(--bg); color:var(--ink);
-  -webkit-font-smoothing:antialiased; transition:background-color .2s ease, color .2s ease; }
+body {
+  font-family:var(--font-sans); background:var(--bg); color:var(--ink);
+  -webkit-font-smoothing:antialiased; transition:background-color .2s ease, color .2s ease;
+}
 h1,h2,h3,.font-heading { font-family:var(--font-heading); }
 .font-mono,.tabular-nums { font-family:var(--font-mono); }
 ::selection { background:rgba(6,182,212,.30); color:inherit; }
+
 .glass-panel {
   background:color-mix(in srgb,var(--card) 88%,transparent);
   backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
@@ -36,25 +41,37 @@ h1,h2,h3,.font-heading { font-family:var(--font-heading); }
 }
 .dark input::placeholder, .dark textarea::placeholder { color:#6b7891; }
 .dark input, .dark textarea, .dark select { color:var(--ink); }
+
+/* ── scrollbars in the app's own palette ── */
 .no-scrollbar::-webkit-scrollbar { display:none; }
 .no-scrollbar { -ms-overflow-style:none; scrollbar-width:none; }
-::-webkit-scrollbar { width:4px; height:4px; }
-::-webkit-scrollbar-track { background:transparent; }
-::-webkit-scrollbar-thumb { background:color-mix(in srgb,var(--mut) 45%,transparent); border-radius:999px; }
-.dark ::-webkit-scrollbar-thumb { background:#33405e; }
+::-webkit-scrollbar { width:5px; height:5px; }
+::-webkit-scrollbar-track { background:color-mix(in srgb,var(--mut) 10%,transparent); border-radius:999px; }
+::-webkit-scrollbar-thumb { background:linear-gradient(180deg,var(--pri),var(--pri2)); border-radius:999px; }
+::-webkit-scrollbar-thumb:hover { background:linear-gradient(180deg,#22d3ee,#6366f1); }
+.dark ::-webkit-scrollbar-track { background:#141c2f; }
+.dark ::-webkit-scrollbar-thumb { background:linear-gradient(180deg,#0891b2,#4338ca); }
+* { scrollbar-width:thin; scrollbar-color:var(--pri) transparent; }
+
+/* ── range card shimmer ── */
 @keyframes border-shimmer { 0%,100%{background-position:0% 50%} 50%{background-position:100% 50%} }
 .range-card-animated { position:relative; background-clip:padding-box; }
-.range-card-animated::before { content:''; position:absolute; inset:-1px; border-radius:inherit;
+.range-card-animated::before {
+  content:''; position:absolute; inset:-1px; border-radius:inherit;
   background:linear-gradient(90deg,#06b6d4,#4f46e5,#06b6d4); background-size:250% 250%;
   animation:border-shimmer 7s ease infinite;
   -webkit-mask:linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-  -webkit-mask-composite:xor; mask-composite:exclude; pointer-events:none; opacity:.25; }
+  -webkit-mask-composite:xor; mask-composite:exclude; pointer-events:none; opacity:.25;
+}
 .range-card-animated:hover::before { opacity:.7; }
 .dark .range-card-animated::before { opacity:.4; }
+
+/* ── shared motion ── */
 @keyframes mascot-float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-5px)} }
 .animate-mascot-float { animation:mascot-float 3.2s ease-in-out infinite; }
 @keyframes pulseDot { 0%,100%{opacity:1} 50%{opacity:.35} }
 .dot-live { animation:pulseDot 1.6s infinite; }
+
 .animate-in { animation-name:zi-enter; animation-duration:.15s; animation-timing-function:cubic-bezier(.16,1,.3,1); animation-fill-mode:both; }
 @keyframes zi-enter { from { opacity:var(--zo,0); transform:translateY(var(--zy,0)) scale(var(--zs,1)); } to { opacity:1; transform:none; } }
 .fade-in { --zo:0; } .zoom-in-95 { --zs:.95; }
@@ -62,94 +79,50 @@ h1,h2,h3,.font-heading { font-family:var(--font-heading); }
 .animate-in.duration-100{animation-duration:.1s} .animate-in.duration-150{animation-duration:.15s}
 .animate-in.duration-200{animation-duration:.2s} .animate-in.duration-300{animation-duration:.3s}
 .line-clamp-2 { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+
+/* ── leaderboard (single canonical copy) ── */
 @keyframes lbEmoji { 0%,100%{transform:translateY(0) scale(1) rotate(0)} 25%{transform:translateY(-2px) scale(1.12) rotate(-8deg)} 55%{transform:translateY(0) scale(1) rotate(0)} 80%{transform:translateY(-1px) scale(1.06) rotate(8deg)} }
-.lb-emoji{display:inline-block;animation:lbEmoji 3.6s ease-in-out infinite;filter:drop-shadow(0 2px 3px rgba(0,0,0,.25))}
+.lb-emoji { display:inline-block; animation:lbEmoji 3.6s ease-in-out infinite; filter:drop-shadow(0 2px 3px rgba(0,0,0,.25)); }
 @keyframes lbSpark { 0%,100%{opacity:.15;transform:scale(.8)} 50%{opacity:.9;transform:scale(1.25)} }
-.lb-spark{animation:lbSpark 3.2s ease-in-out infinite}
+.lb-spark { animation:lbSpark 3.2s ease-in-out infinite; }
+@keyframes avatarFloat { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-3px)} }
+@keyframes avatarBlink { 0%,92%,100%{transform:scaleY(1)} 95%{transform:scaleY(.1)} }
+@keyframes crownBounce { 0%,100%{transform:translateY(0) rotate(-2deg)} 50%{transform:translateY(-2px) rotate(2deg)} }
+@keyframes podiumShine { 0%{background-position:-200% 0} 100%{background-position:200% 0} }
+@keyframes confettiFall { 0%{transform:translateY(-20px) rotate(0);opacity:1} 100%{transform:translateY(40px) rotate(360deg);opacity:0} }
+@keyframes rankPulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.08)} }
+.avatar-float { animation:avatarFloat 3s ease-in-out infinite; }
+.avatar-eyes { transform-origin:center; animation:avatarBlink 4s infinite; }
+.avatar-crown { transform-origin:center bottom; animation:crownBounce 2s ease-in-out infinite; }
+.podium-shine { background:linear-gradient(90deg,transparent 0%,rgba(255,255,255,.3) 50%,transparent 100%); background-size:200% 100%; animation:podiumShine 3s linear infinite; }
+.confetti-piece { animation:confettiFall 2s ease-in infinite; }
+.rank-up { animation:rankPulse 1.5s ease-in-out infinite; }
 
-/* === APPEND: Leaderboard avatar animations === */
-@keyframes avatarFloat {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-3px); }
-}
-@keyframes avatarBlink {
-  0%, 92%, 100% { transform: scaleY(1); }
-  95% { transform: scaleY(0.1); }
-}
-@keyframes crownBounce {
-  0%, 100% { transform: translateY(0) rotate(-2deg); }
-  50% { transform: translateY(-2px) rotate(2deg); }
-}
-@keyframes podiumShine {
-  0% { background-position: -200% 0; }
-  100% { background-position: 200% 0; }
-}
-@keyframes confettiFall {
-  0% { transform: translateY(-20px) rotate(0deg); opacity: 1; }
-  100% { transform: translateY(40px) rotate(360deg); opacity: 0; }
-}
-@keyframes rankPulse {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.08); }
-}
-.avatar-float { animation: avatarFloat 3s ease-in-out infinite; }
-.avatar-eyes { transform-origin: center; animation: avatarBlink 4s infinite; }
-.avatar-crown { transform-origin: center bottom; animation: crownBounce 2s ease-in-out infinite; }
-.podium-shine {
-  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.3) 50%, transparent 100%);
-  background-size: 200% 100%;
-  animation: podiumShine 3s linear infinite;
-}
-.confetti-piece { animation: confettiFall 2s ease-in infinite; }
-.rank-up { animation: rankPulse 1.5s ease-in-out infinite; }
-/* === EOF: index.css append === */
+/* ── OTP floating card countdown ── */
+@keyframes otpTimer { from { width:100%; } to { width:0%; } }
+.otp-timer-bar { animation:otpTimer 3s linear forwards; }
 
-@keyframes avatarFloat { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
-@keyframes avatarBlink { 0%, 92%, 100% { transform: scaleY(1); } 95% { transform: scaleY(0.1); } }
-@keyframes crownBounce { 0%, 100% { transform: translateY(0) rotate(-2deg); } 50% { transform: translateY(-2px) rotate(2deg); } }
-@keyframes podiumShine { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
-@keyframes confettiFall { 0% { transform: translateY(-20px) rotate(0deg); opacity: 1; } 100% { transform: translateY(40px) rotate(360deg); opacity: 0; } }
-@keyframes rankPulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.08); } }
-.avatar-float { animation: avatarFloat 3s ease-in-out infinite; }
-.avatar-eyes { transform-origin: center; animation: avatarBlink 4s infinite; }
-.avatar-crown { transform-origin: center bottom; animation: crownBounce 2s ease-in-out infinite; }
-.podium-shine { background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.3) 50%, transparent 100%); background-size: 200% 100%; animation: podiumShine 3s linear infinite; }
-.confetti-piece { animation: confettiFall 2s ease-in infinite; }
-.rank-up { animation: rankPulse 1.5s ease-in-out infinite; }
-/* === EOF: index.css animations === */
-
-/* Leaderboard animations */
-@keyframes avatarFloat { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
-@keyframes avatarBlink { 0%, 92%, 100% { transform: scaleY(1); } 95% { transform: scaleY(0.1); } }
-@keyframes crownBounce { 0%, 100% { transform: translateY(0) rotate(-2deg); } 50% { transform: translateY(-2px) rotate(2deg); } }
-@keyframes podiumShine { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
-@keyframes confettiFall { 0% { transform: translateY(-20px) rotate(0deg); opacity: 1; } 100% { transform: translateY(40px) rotate(360deg); opacity: 0; } }
-.avatar-float { animation: avatarFloat 3s ease-in-out infinite; }
-.avatar-eyes { transform-origin: center; animation: avatarBlink 4s infinite; }
-.avatar-crown { transform-origin: center bottom; animation: crownBounce 2s ease-in-out infinite; }
-.podium-shine { background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.3) 50%, transparent 100%); background-size: 200% 100%; animation: podiumShine 3s linear infinite; }
-.confetti-piece { animation: confettiFall 2s ease-in infinite; }
-/* === EOF: index.css leaderboard animations === *//* === OTP floating card 3s countdown bar === */
-@keyframes otpTimer { from { width: 100%; } to { width: 0%; } }
-.otp-timer-bar { animation: otpTimer 3s linear forwards; }
-/* === EOF append === */
-/* === Dispatch animation v2 (1.4s, parallel to API) === */
-@keyframes shipOverlay { 0% {opacity:0} 10% {opacity:1} 78% {opacity:1} 100% {opacity:0} }
-.ship-overlay { animation: shipOverlay 1.4s ease both; }
-@keyframes shipCardPop { 0% {transform:scale(.72) translateY(12px); opacity:0} 16% {transform:scale(1.05) translateY(0); opacity:1} 30% {transform:scale(1)} 100% {transform:scale(1); opacity:1} }
-.ship-card { position:relative; animation: shipCardPop 1.4s cubic-bezier(.22,1,.36,1) both; }
-.ship-ring { position:absolute; left:50%; top:50%; width:76px; height:76px; margin:-38px 0 0 -38px; border-radius:50%; border:2px solid rgba(34,211,238,.45); animation: shipRing 1.15s ease-out both; }
-.ship-ring-b { animation-delay:.22s; border-color: rgba(129,140,248,.4); }
-@keyframes shipRing { 0% {transform:scale(.45); opacity:.9} 100% {transform:scale(1.55); opacity:0} }
-.ship-boat { position:relative; z-index:2; width:56px; height:56px; border-radius:18px; background:linear-gradient(135deg,#06b6d4,#4f46e5); display:flex; align-items:center; justify-content:center; box-shadow:0 12px 30px -8px rgba(6,182,212,.55); animation: shipSail 1.4s cubic-bezier(.45,0,.25,1) both; }
-@keyframes shipSail { 0% {transform:translateX(-34px) rotate(-6deg) scale(.9)} 45% {transform:translateX(4px) rotate(3deg) scale(1.06)} 75% {transform:translateX(24px) rotate(-2deg)} 100% {transform:translateX(34px) rotate(0) scale(1)} }
-.ship-wake { position:absolute; top:50%; height:4px; border-radius:9999px; background:linear-gradient(90deg,transparent,rgba(103,232,249,.85)); animation: shipWake 1.05s ease-out both; z-index:1; }
+/* ── dispatch animation (1.4s, parallel to the API) ── */
+@keyframes shipOverlay { 0%{opacity:0} 10%{opacity:1} 78%{opacity:1} 100%{opacity:0} }
+.ship-overlay { animation:shipOverlay 1.4s ease both; }
+@keyframes shipCardPop { 0%{transform:scale(.72) translateY(12px);opacity:0} 16%{transform:scale(1.05) translateY(0);opacity:1} 30%{transform:scale(1)} 100%{transform:scale(1);opacity:1} }
+.ship-card { position:relative; animation:shipCardPop 1.4s cubic-bezier(.22,1,.36,1) both; }
+.ship-ring { position:absolute; left:50%; top:50%; width:76px; height:76px; margin:-38px 0 0 -38px; border-radius:50%; border:2px solid rgba(34,211,238,.45); animation:shipRing 1.15s ease-out both; }
+.ship-ring-b { animation-delay:.22s; border-color:rgba(129,140,248,.4); }
+@keyframes shipRing { 0%{transform:scale(.45);opacity:.9} 100%{transform:scale(1.55);opacity:0} }
+.ship-boat { position:relative; z-index:2; width:56px; height:56px; border-radius:18px; background:linear-gradient(135deg,#06b6d4,#4f46e5); display:flex; align-items:center; justify-content:center; box-shadow:0 12px 30px -8px rgba(6,182,212,.55); animation:shipSail 1.4s cubic-bezier(.45,0,.25,1) both; }
+@keyframes shipSail { 0%{transform:translateX(-34px) rotate(-6deg) scale(.9)} 45%{transform:translateX(4px) rotate(3deg) scale(1.06)} 75%{transform:translateX(24px) rotate(-2deg)} 100%{transform:translateX(34px) rotate(0) scale(1)} }
+.ship-wake { position:absolute; top:50%; height:4px; border-radius:9999px; background:linear-gradient(90deg,transparent,rgba(103,232,249,.85)); animation:shipWake 1.05s ease-out both; z-index:1; }
 .ship-wake-1 { width:26px; left:6px; margin-top:-2px; animation-delay:.12s }
-.ship-wake-2 { width:18px; left:0; margin-top:5px; animation-delay:.28s; opacity:.7 }
+.ship-wake-2 { width:18px; left:0; margin-top:5px; margin-left:0; animation-delay:.28s; opacity:.7 }
 .ship-wake-3 { width:12px; left:4px; margin-top:-9px; animation-delay:.42s; opacity:.5 }
-@keyframes shipWake { 0% {opacity:0; transform:translateX(18px) scaleX(.3)} 35% {opacity:.9} 100% {opacity:0; transform:translateX(-14px) scaleX(1)} }
-.ship-label { animation: shipLabel 1.4s ease both; }
-@keyframes shipLabel { 0% {opacity:0; transform:translateY(6px)} 18% {opacity:1; transform:none} 82% {opacity:1} 100% {opacity:0} }
-.ship-bar i { display:block; height:100%; width:0; border-radius:9999px; background:linear-gradient(90deg,#22d3ee,#818cf8); animation: shipBar 1.15s cubic-bezier(.3,.7,.4,1) both; }
-@keyframes shipBar { 0% {width:0} 60% {width:78%} 100% {width:100%} }
-/* === EOF: dispatch anim v2 === */
+@keyframes shipWake { 0%{opacity:0;transform:translateX(18px) scaleX(.3)} 35%{opacity:.9} 100%{opacity:0;transform:translateX(-14px) scaleX(1)} }
+.ship-label { animation:shipLabel 1.4s ease both; }
+@keyframes shipLabel { 0%{opacity:0;transform:translateY(6px)} 18%{opacity:1;transform:none} 82%{opacity:1} 100%{opacity:0} }
+.ship-bar i { display:block; height:100%; width:0; border-radius:9999px; background:linear-gradient(90deg,#22d3ee,#818cf8); animation:shipBar 1.15s cubic-bezier(.3,.7,.4,1) both; }
+@keyframes shipBar { 0%{width:0} 60%{width:78%} 100%{width:100%} }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; }
+  .otp-timer-bar { animation:otpTimer 3s linear forwards !important; }
+}
